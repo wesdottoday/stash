@@ -67,7 +67,8 @@ final class CaptureWindow: NSPanel {
 
     func showConfirmation(durationMs: Int, completion: @escaping () -> Void) {
         captureView.showConfirmationIndicator()
-        let delay = max(50, min(500, durationMs))
+        let range = Preferences.confirmationDurationRange
+        let delay = max(range.lowerBound, min(range.upperBound, durationMs))
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delay)) { [weak self] in
             self?.captureView.hideConfirmationIndicator()
             completion()

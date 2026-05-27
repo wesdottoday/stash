@@ -11,8 +11,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let chooseFolderButton = NSButton(title: "Choose…", target: nil, action: nil)
     private let hotkeyField = KeyCaptureField()
     private let confirmToggle = NSButton(checkboxWithTitle: "Show save confirmation", target: nil, action: nil)
-    private let durationField = NSTextField(string: "100")
-    private let durationStepper = NSStepper()
+    private let durationSlider = NSSlider()
+    private let durationValueLabel = NSTextField(labelWithString: "100 ms")
     private let normalizationToggle = NSButton(checkboxWithTitle: "Image normalization", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
     private let menuBarNoteHeader = NSTextField(labelWithString: "")
@@ -84,18 +84,19 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         confirmToggle.target = self
         confirmToggle.action = #selector(confirmToggleChanged)
-        durationField.target = self
-        durationField.action = #selector(durationFieldChanged)
-        durationField.alignment = .right
-        durationField.placeholderString = "100"
-        durationField.formatter = makeIntegerFormatter(min: 50, max: 500)
 
-        durationStepper.minValue = 50
-        durationStepper.maxValue = 500
-        durationStepper.increment = 10
-        durationStepper.valueWraps = false
-        durationStepper.target = self
-        durationStepper.action = #selector(durationStepperChanged)
+        let range = Preferences.confirmationDurationRange
+        durationSlider.minValue = Double(range.lowerBound)
+        durationSlider.maxValue = Double(range.upperBound)
+        durationSlider.isContinuous = true
+        durationSlider.allowsTickMarkValuesOnly = false
+        durationSlider.target = self
+        durationSlider.action = #selector(durationSliderChanged)
+        durationSlider.controlSize = .small
+
+        durationValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        durationValueLabel.textColor = .secondaryLabelColor
+        durationValueLabel.alignment = .right
 
         normalizationToggle.target = self
         normalizationToggle.action = #selector(normalizationChanged)
@@ -142,7 +143,11 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         let hotkeyRow = labeledRow("Global hotkey:", control: hotkeyField)
 
-        let durationRow = horizontalStack([durationField, durationStepper, label("ms")], spacing: 6)
+        let durationRow = horizontalStack([durationSlider, durationValueLabel], spacing: 8)
+        durationSlider.translatesAutoresizingMaskIntoConstraints = false
+        durationSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        durationValueLabel.translatesAutoresizingMaskIntoConstraints = false
+        durationValueLabel.widthAnchor.constraint(equalToConstant: 72).isActive = true
         let confirmRow = labeledRow("Save confirmation:",
                                     control: verticalStack([confirmToggle, durationRow], spacing: 6))
 
@@ -169,7 +174,6 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -18),
             folderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
             hotkeyField.widthAnchor.constraint(equalToConstant: 160),
-            durationField.widthAnchor.constraint(equalToConstant: 70),
         ])
     }
 
@@ -225,32 +229,16 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         return s
     }
 
-    private func label(_ text: String) -> NSTextField {
-        let l = NSTextField(labelWithString: text)
-        l.textColor = .secondaryLabelColor
-        l.font = .systemFont(ofSize: 12)
-        return l
-    }
-
-    private func makeIntegerFormatter(min: Int, max: Int) -> NumberFormatter {
-        let f = NumberFormatter()
-        f.allowsFloats = false
-        f.minimum = NSNumber(value: min)
-        f.maximum = NSNumber(value: max)
-        f.maximumFractionDigits = 0
-        return f
-    }
-
     // MARK: - Load / Save ----------------------------------------------------
 
     private func loadFromPreferences() {
         folderField.stringValue = (prefs.destinationFolder as NSString).abbreviatingWithTildeInPath
         hotkeyField.setBinding(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
         confirmToggle.state = prefs.confirmationEnabled ? .on : .off
-        durationField.stringValue = String(prefs.confirmationDuration)
-        durationStepper.integerValue = prefs.confirmationDuration
-        durationField.isEnabled = prefs.confirmationEnabled
-        durationStepper.isEnabled = prefs.confirmationEnabled
+        durationSlider.integerValue = prefs.confirmationDuration
+        durationValueLabel.stringValue = "\(prefs.confirmationDuration) ms"
+        durationSlider.isEnabled = prefs.confirmationEnabled
+        durationValueLabel.alphaValue = prefs.confirmationEnabled ? 1.0 : 0.4
         normalizationToggle.state = prefs.imageNormalization ? .on : .off
         menuBarToggle.state = prefs.menuBarEnabled ? .on : .off
         updateMenuBarNote()
@@ -291,22 +279,18 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func confirmToggleChanged() {
-        prefs.confirmationEnabled = (confirmToggle.state == .on)
-        durationField.isEnabled = prefs.confirmationEnabled
-        durationStepper.isEnabled = prefs.confirmationEnabled
+        let enabled = (confirmToggle.state == .on)
+        prefs.confirmationEnabled = enabled
+        durationSlider.isEnabled = enabled
+        durationValueLabel.alphaValue = enabled ? 1.0 : 0.4
     }
 
-    @objc private func durationFieldChanged() {
-        let v = max(50, min(500, durationField.integerValue))
-        prefs.confirmationDuration = v
-        durationField.integerValue = v
-        durationStepper.integerValue = v
-    }
-
-    @objc private func durationStepperChanged() {
-        let v = max(50, min(500, durationStepper.integerValue))
-        prefs.confirmationDuration = v
-        durationField.integerValue = v
+    @objc private func durationSliderChanged() {
+        // Round to nearest 10 ms while dragging for less jitter on the label.
+        let raw = durationSlider.integerValue
+        let snapped = ((raw + 5) / 10) * 10
+        prefs.confirmationDuration = snapped
+        durationValueLabel.stringValue = "\(snapped) ms"
     }
 
     @objc private func normalizationChanged() {

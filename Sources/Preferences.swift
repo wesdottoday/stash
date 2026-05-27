@@ -62,12 +62,18 @@ final class Preferences {
         set { defaults.set(newValue, forKey: Keys.confirmationEnabled) }
     }
 
+    static let confirmationDurationRange: ClosedRange<Int> = 50...2000
+
     var confirmationDuration: Int {
         get {
             let v = defaults.integer(forKey: Keys.confirmationDuration)
-            return max(50, min(500, v == 0 ? 100 : v))
+            let raw = v == 0 ? 100 : v
+            return Self.confirmationDurationRange.clamp(raw)
         }
-        set { defaults.set(max(50, min(500, newValue)), forKey: Keys.confirmationDuration) }
+        set {
+            defaults.set(Self.confirmationDurationRange.clamp(newValue),
+                         forKey: Keys.confirmationDuration)
+        }
     }
 
     var imageNormalization: Bool {
@@ -102,5 +108,11 @@ final class Preferences {
     var hasLaunchedBefore: Bool {
         get { defaults.bool(forKey: Keys.hasLaunchedBefore) }
         set { defaults.set(newValue, forKey: Keys.hasLaunchedBefore) }
+    }
+}
+
+private extension ClosedRange where Bound: Comparable {
+    func clamp(_ value: Bound) -> Bound {
+        Swift.max(lowerBound, Swift.min(upperBound, value))
     }
 }
