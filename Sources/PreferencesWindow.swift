@@ -15,7 +15,16 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let durationStepper = NSStepper()
     private let normalizationToggle = NSButton(checkboxWithTitle: "Image normalization", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
-    private let menuBarNote = NSTextField(labelWithString: "")
+    private let menuBarNoteHeader = NSTextField(labelWithString: "")
+    private let menuBarNoteCode = NSTextField(labelWithString: "")
+    private let menuBarNoteDocsLink = NSButton(title: "", target: nil, action: nil)
+    private lazy var menuBarNoteContainer: NSStackView = {
+        let s = NSStackView(views: [menuBarNoteHeader, menuBarNoteCode, menuBarNoteDocsLink])
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 2
+        return s
+    }()
 
     convenience init() {
         let window = NSWindow(
@@ -91,10 +100,34 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         menuBarToggle.target = self
         menuBarToggle.action = #selector(menuBarChanged)
 
-        menuBarNote.font = .systemFont(ofSize: 11)
-        menuBarNote.textColor = .secondaryLabelColor
-        menuBarNote.maximumNumberOfLines = 3
-        menuBarNote.lineBreakMode = .byWordWrapping
+        menuBarNoteHeader.font = .systemFont(ofSize: 11)
+        menuBarNoteHeader.textColor = .secondaryLabelColor
+        menuBarNoteHeader.usesSingleLineMode = false
+        menuBarNoteHeader.maximumNumberOfLines = 2
+
+        menuBarNoteCode.font = .userFixedPitchFont(ofSize: 10) ?? .monospacedSystemFont(ofSize: 10, weight: .regular)
+        menuBarNoteCode.textColor = .secondaryLabelColor
+        menuBarNoteCode.usesSingleLineMode = true
+        menuBarNoteCode.lineBreakMode = .byTruncatingTail
+
+        menuBarNoteDocsLink.target = self
+        menuBarNoteDocsLink.action = #selector(openSourceLink)
+        menuBarNoteDocsLink.isBordered = false
+        menuBarNoteDocsLink.bezelStyle = .recessed
+        menuBarNoteDocsLink.font = .systemFont(ofSize: 11)
+        menuBarNoteDocsLink.attributedTitle = NSAttributedString(
+            string: "Docs: github.com/wesdottoday/stash",
+            attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .font: NSFont.systemFont(ofSize: 11),
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ]
+        )
+        menuBarNoteDocsLink.setButtonType(.momentaryChange)
+        if let cell = menuBarNoteDocsLink.cell as? NSButtonCell {
+            cell.imagePosition = .noImage
+            cell.bezelStyle = .recessed
+        }
 
         let folderRow = labeledRow(
             "Destination folder:",
@@ -111,7 +144,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
                                     control: verticalStack([confirmToggle, durationRow], spacing: 6))
 
         let imageRow = labeledRow("Image handling:", control: normalizationToggle)
-        let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNote], spacing: 4))
+        let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNoteContainer], spacing: 4))
 
         let footer = makeFooter()
 
@@ -221,11 +254,12 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func updateMenuBarNote() {
-        if prefs.menuBarEnabled {
-            menuBarNote.stringValue = ""
-        } else {
-            menuBarNote.stringValue = "Hidden. Re-enable via the command line:\n  defaults write com.wesdottoday.stash menuBarEnabled -bool true\nDocs: github.com/wesdottoday/stash"
-        }
+        let visible = !prefs.menuBarEnabled
+        menuBarNoteHeader.stringValue = visible ? "Hidden. Re-enable via the command line:" : ""
+        menuBarNoteCode.stringValue   = visible ? "defaults write com.wesdottoday.stash menuBarEnabled -bool true" : ""
+        menuBarNoteHeader.isHidden = !visible
+        menuBarNoteCode.isHidden   = !visible
+        menuBarNoteDocsLink.isHidden = !visible
     }
 
     // MARK: - Actions ---------------------------------------------------------
