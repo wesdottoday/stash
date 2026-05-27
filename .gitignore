@@ -1,0 +1,6 @@
+build/
+*.xcuserstate
+*.xcuserdatad/
+.DS_Store
+xcuserdata/
+.build/
