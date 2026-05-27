@@ -42,6 +42,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
+        // Always reload from defaults on show so external changes via
+        // `defaults write` are reflected in the UI.
+        loadFromPreferences()
         if let w = window {
             w.center()
             w.makeKeyAndOrderFront(nil)

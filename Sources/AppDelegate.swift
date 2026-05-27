@@ -10,6 +10,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isWindowVisible = false
     private var pendingSourceApp: String?
 
+    // Snapshot of the last-applied preference values, so we can tell which
+    // keys actually changed when UserDefaults.didChangeNotification fires.
+    private var snapMenuBarEnabled: Bool = true
+    private var snapHotkeyKeyCode: UInt32 = 0
+    private var snapHotkeyModifiers: NSEvent.ModifierFlags = []
+    private var snapDestinationFolder: String = ""
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Pre-create the capture window so the hotkey is instant.
         captureWindow = CaptureWindow()
@@ -42,6 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  cocoaModifiers: self.prefs.hotkeyModifiers)
         }
 
+        // Pick up external preference changes (`defaults write …`) live.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(defaultsChanged(_:)),
+            name: UserDefaults.didChangeNotification,
+            object: nil
+        )
+        cachePreferenceSnapshot()
+
         // First launch: show preferences.
         if !prefs.hasLaunchedBefore {
             prefs.hasLaunchedBefore = true
@@ -52,6 +68,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hotkey?.unregister()
         menuBar?.uninstall()
+    }
+
+    // MARK: - Defaults reload -------------------------------------------------
+
+    private func cachePreferenceSnapshot() {
+        snapMenuBarEnabled = prefs.menuBarEnabled
+        snapHotkeyKeyCode  = prefs.hotkeyKeyCode
+        snapHotkeyModifiers = prefs.hotkeyModifiers
+        snapDestinationFolder = prefs.destinationFolder
+    }
+
+    @objc private func defaultsChanged(_ note: Notification) {
+        // didChangeNotification fires for our own writes too. Diff against
+        // the cached snapshot so we only react to real changes — and to
+        // avoid feedback loops where setting a pref re-triggers ourselves.
+        let menuBar = prefs.menuBarEnabled
+        if menuBar != snapMenuBarEnabled {
+            snapMenuBarEnabled = menuBar
+            if menuBar { self.menuBar.install() } else { self.menuBar.uninstall() }
+        }
+
+        let kc = prefs.hotkeyKeyCode
+        let mods = prefs.hotkeyModifiers
+        if kc != snapHotkeyKeyCode || mods != snapHotkeyModifiers {
+            snapHotkeyKeyCode = kc
+            snapHotkeyModifiers = mods
+            hotkey.register(keyCode: kc, cocoaModifiers: mods)
+        }
+
+        let dest = prefs.destinationFolder
+        if dest != snapDestinationFolder {
+            snapDestinationFolder = dest
+            _ = ContentHandler.ensureDirectory(prefs.destinationFolderURL)
+        }
     }
 
     // MARK: - Hotkey ----------------------------------------------------------
