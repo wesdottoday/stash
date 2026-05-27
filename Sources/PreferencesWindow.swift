@@ -17,9 +17,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
     private let menuBarNoteHeader = NSTextField(labelWithString: "")
     private let menuBarNoteCode = NSTextField(labelWithString: "")
+    private let menuBarNoteCopyButton = NSButton(title: "Copy", target: nil, action: nil)
     private let menuBarNoteDocsLink = NSButton(title: "", target: nil, action: nil)
+    private lazy var menuBarNoteCodeRow: NSStackView = {
+        let s = NSStackView(views: [menuBarNoteCode, menuBarNoteCopyButton])
+        s.orientation = .horizontal
+        s.alignment = .firstBaseline
+        s.spacing = 6
+        return s
+    }()
     private lazy var menuBarNoteContainer: NSStackView = {
-        let s = NSStackView(views: [menuBarNoteHeader, menuBarNoteCode, menuBarNoteDocsLink])
+        let s = NSStackView(views: [menuBarNoteHeader, menuBarNoteCodeRow, menuBarNoteDocsLink])
         s.orientation = .vertical
         s.alignment = .leading
         s.spacing = 2
@@ -113,6 +121,16 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         menuBarNoteCode.textColor = .secondaryLabelColor
         menuBarNoteCode.usesSingleLineMode = true
         menuBarNoteCode.lineBreakMode = .byTruncatingTail
+        // Allow click-drag selection and Cmd-C so the user can lift the
+        // command line out of the prefs pane without retyping it.
+        menuBarNoteCode.isSelectable = true
+        menuBarNoteCode.allowsEditingTextAttributes = false
+
+        menuBarNoteCopyButton.controlSize = .small
+        menuBarNoteCopyButton.bezelStyle = .rounded
+        menuBarNoteCopyButton.font = .systemFont(ofSize: 11)
+        menuBarNoteCopyButton.target = self
+        menuBarNoteCopyButton.action = #selector(copyMenuBarHintCommand)
 
         menuBarNoteDocsLink.target = self
         menuBarNoteDocsLink.action = #selector(openSourceLink)
@@ -247,10 +265,26 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private func updateMenuBarNote() {
         let visible = !prefs.menuBarEnabled
         menuBarNoteHeader.stringValue = visible ? "Hidden. Re-enable via the command line:" : ""
-        menuBarNoteCode.stringValue   = visible ? "defaults write com.wesdottoday.stash menuBarEnabled -bool true" : ""
+        menuBarNoteCode.stringValue   = visible ? Self.menuBarHintCommand : ""
         menuBarNoteHeader.isHidden = !visible
+        menuBarNoteCodeRow.isHidden = !visible
         menuBarNoteCode.isHidden   = !visible
+        menuBarNoteCopyButton.isHidden = !visible
         menuBarNoteDocsLink.isHidden = !visible
+    }
+
+    private static let menuBarHintCommand = "defaults write com.wesdottoday.stash menuBarEnabled -bool true"
+
+    @objc private func copyMenuBarHintCommand() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(Self.menuBarHintCommand, forType: .string)
+        // Tiny visual ack — flip the title for a moment so the user knows it
+        // worked, since the pasteboard is otherwise invisible.
+        menuBarNoteCopyButton.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in
+            self?.menuBarNoteCopyButton.title = "Copy"
+        }
     }
 
     // MARK: - Actions ---------------------------------------------------------
