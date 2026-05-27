@@ -22,6 +22,7 @@ final class CaptureView: NSView, NSTextViewDelegate {
     // MARK: - Subviews
     private let visualEffect = NSVisualEffectView()
     private let imagePreview = NSImageView()
+    private let attachmentChip = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     let textView = CaptureTextView()
     private let hintLabel = NSTextField(labelWithString: "↵ to save.")
@@ -33,7 +34,10 @@ final class CaptureView: NSView, NSTextViewDelegate {
     private var pastedFileURL: URL?
     private var hasUserInteraction = false
     private var imageVisible = false
+    private var attachmentChipVisible = false
     private var warningVisible = false
+    private let attachmentChipHeight: CGFloat = 22
+    private let attachmentChipSpacing: CGFloat = 6
 
     var sourceApp: String?
 
@@ -146,7 +150,18 @@ final class CaptureView: NSView, NSTextViewDelegate {
         warningLabel.alignment = .left
         warningLabel.isHidden = true
 
+        // Attachment chip — shows filename/size when a file is pasted
+        attachmentChip.font = .systemFont(ofSize: 12, weight: .medium)
+        attachmentChip.textColor = .secondaryLabelColor
+        attachmentChip.isEditable = false
+        attachmentChip.isBordered = false
+        attachmentChip.drawsBackground = false
+        attachmentChip.usesSingleLineMode = true
+        attachmentChip.lineBreakMode = .byTruncatingMiddle
+        attachmentChip.isHidden = true
+
         addSubview(imagePreview)
+        addSubview(attachmentChip)
         addSubview(scrollView)
         addSubview(hintLabel)
         addSubview(confirmationLabel)
@@ -176,6 +191,13 @@ final class CaptureView: NSView, NSTextViewDelegate {
             }
             imagePreview.frame = NSRect(x: contentLeft, y: cursorY - h, width: w, height: h)
             cursorY -= (h + imagePreviewSpacing)
+        }
+
+        // Attachment chip (above text field, under image preview if any)
+        if attachmentChipVisible {
+            attachmentChip.frame = NSRect(x: contentLeft, y: cursorY - attachmentChipHeight,
+                                          width: contentWidth, height: attachmentChipHeight)
+            cursorY -= (attachmentChipHeight + attachmentChipSpacing)
         }
 
         // Warning (just under image preview, above text field)
@@ -221,6 +243,9 @@ final class CaptureView: NSView, NSTextViewDelegate {
         imagePreview.image = nil
         imagePreview.isHidden = true
         imageVisible = false
+        attachmentChip.stringValue = ""
+        attachmentChip.isHidden = true
+        attachmentChipVisible = false
         warningLabel.stringValue = ""
         warningLabel.isHidden = true
         warningVisible = false
@@ -258,6 +283,9 @@ final class CaptureView: NSView, NSTextViewDelegate {
             }
             _ = w
             total += h + imagePreviewSpacing
+        }
+        if attachmentChipVisible {
+            total += attachmentChipHeight + attachmentChipSpacing
         }
         if warningVisible {
             total += warningHeight + warningSpacing
@@ -307,6 +335,26 @@ final class CaptureView: NSView, NSTextViewDelegate {
         onContentHeightChange?(preferredHeight())
     }
 
+    // MARK: - Attachment chip -------------------------------------------------
+
+    private func showAttachmentChip(label: String) {
+        attachmentChip.stringValue = label
+        attachmentChip.isHidden = false
+        attachmentChipVisible = true
+        needsLayout = true
+    }
+
+    private static let fileSizeFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useKB, .useMB, .useGB]
+        f.countStyle = .file
+        return f
+    }()
+
+    private func humanFileSize(_ size: Int64) -> String {
+        Self.fileSizeFormatter.string(fromByteCount: size)
+    }
+
     // MARK: - Paste -----------------------------------------------------------
 
     /// Returns true if paste was consumed (image or file). False to let the
@@ -317,11 +365,14 @@ final class CaptureView: NSView, NSTextViewDelegate {
         // File URL on the clipboard → file paste (no image preview, copied as file)
         if let firstURL = filesFromPasteboard(pb).first {
             let attrs = try? FileManager.default.attributesOfItem(atPath: firstURL.path)
-            if let size = attrs?[.size] as? Int64, size > 100 * 1024 * 1024 {
+            let size = attrs?[.size] as? Int64 ?? 0
+            if size > 100 * 1024 * 1024 {
                 showWarning("File over 100MB — paste discarded. Type a note instead.")
                 return true
             }
             pastedFileURL = firstURL
+            showAttachmentChip(label: "📎 \(firstURL.lastPathComponent)" +
+                               (size > 0 ? "  · \(humanFileSize(size))" : ""))
             hasUserInteraction = true
             hintLabel.isHidden = true
             needsLayout = true
