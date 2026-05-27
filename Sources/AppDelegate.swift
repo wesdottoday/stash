@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController()
         menuBar.onPreferences = { [weak self] in self?.showPreferences() }
         menuBar.onQuit = { NSApp.terminate(nil) }
-        if prefs.menuBarEnabled { menuBar.install() }
+        applyMenuBarVisibility(prefs.menuBarEnabled)
 
         // Hotkey
         hotkey = HotkeyManager()
@@ -72,6 +72,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Defaults reload -------------------------------------------------
 
+    /// Install or remove the menu bar icon AND switch the activation policy.
+    ///
+    /// When the menu bar is hidden, switch to .regular so the app shows in
+    /// the Dock and Force Quit — without that fallback the user has no GUI
+    /// route to quit. When the menu bar is back, switch to .accessory to
+    /// disappear from the Dock and Cmd-Tab again.
+    private func applyMenuBarVisibility(_ enabled: Bool) {
+        if enabled {
+            menuBar.install()
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            menuBar.uninstall()
+            NSApp.setActivationPolicy(.regular)
+        }
+    }
+
     private func cachePreferenceSnapshot() {
         snapMenuBarEnabled = prefs.menuBarEnabled
         snapHotkeyKeyCode  = prefs.hotkeyKeyCode
@@ -86,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuBar = prefs.menuBarEnabled
         if menuBar != snapMenuBarEnabled {
             snapMenuBarEnabled = menuBar
-            if menuBar { self.menuBar.install() } else { self.menuBar.uninstall() }
+            applyMenuBarVisibility(menuBar)
         }
 
         let kc = prefs.hotkeyKeyCode
@@ -198,8 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.hotkey.register(keyCode: kc, cocoaModifiers: mods)
             }
             preferencesController?.onMenuBarChanged = { [weak self] enabled in
-                guard let self = self else { return }
-                if enabled { self.menuBar.install() } else { self.menuBar.uninstall() }
+                self?.applyMenuBarVisibility(enabled)
             }
             preferencesController?.onHotkeyCaptureBegin = { [weak self] in
                 self?.hotkey.unregister()
