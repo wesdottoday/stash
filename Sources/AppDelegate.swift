@@ -17,6 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var snapHotkeyModifiers: NSEvent.ModifierFlags = []
     private var snapDestinationFolder: String = ""
 
+    // Periodic sync so out-of-process `defaults write` from the CLI is
+    // picked up — UserDefaults' in-memory cache doesn't always notice when
+    // the plist is rewritten beneath us, so didChangeNotification alone is
+    // insufficient.
+    private var defaultsSyncTimer: Timer?
+    private let defaultsSyncInterval: TimeInterval = 2.0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Pre-create the capture window so the hotkey is instant.
         captureWindow = CaptureWindow()
@@ -57,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         cachePreferenceSnapshot()
+        startDefaultsSyncTimer()
 
         // First launch: show preferences.
         if !prefs.hasLaunchedBefore {
@@ -66,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        defaultsSyncTimer?.invalidate()
+        defaultsSyncTimer = nil
         hotkey?.unregister()
         menuBar?.uninstall()
     }
@@ -96,9 +106,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func defaultsChanged(_ note: Notification) {
-        // didChangeNotification fires for our own writes too. Diff against
-        // the cached snapshot so we only react to real changes — and to
-        // avoid feedback loops where setting a pref re-triggers ourselves.
+        reconcilePreferences()
+    }
+
+    /// Compare each preference against the cached snapshot and apply the
+    /// runtime effect of anything that changed. Called both from
+    /// didChangeNotification (in-process writes) and from the periodic poll
+    /// (external `defaults write` from the CLI).
+    private func reconcilePreferences() {
         let menuBar = prefs.menuBarEnabled
         if menuBar != snapMenuBarEnabled {
             snapMenuBarEnabled = menuBar
@@ -118,6 +133,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             snapDestinationFolder = dest
             _ = ContentHandler.ensureDirectory(prefs.destinationFolderURL)
         }
+    }
+
+    private func startDefaultsSyncTimer() {
+        defaultsSyncTimer?.invalidate()
+        let timer = Timer(timeInterval: defaultsSyncInterval, repeats: true) { [weak self] _ in
+            self?.syncDefaultsFromDisk()
+        }
+        // Use .common so the poll keeps ticking during tracking-mode runs
+        // (e.g. while the user is dragging the duration slider).
+        RunLoop.main.add(timer, forMode: .common)
+        defaultsSyncTimer = timer
+    }
+
+    private func syncDefaultsFromDisk() {
+        // synchronize() is documented as deprecated for normal use because
+        // UserDefaults usually auto-syncs in-process. For our purpose —
+        // detecting out-of-process plist writes from `defaults write` — it
+        // is still the documented mechanism and the only public API that
+        // forces a re-read.
+        UserDefaults.standard.synchronize()
+        reconcilePreferences()
     }
 
     // MARK: - Hotkey ----------------------------------------------------------
