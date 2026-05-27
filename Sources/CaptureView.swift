@@ -391,18 +391,53 @@ final class CaptureTextView: NSTextView {
         super.paste(sender)
     }
 
+    /// Borderless windows don't get the system main menu's key equivalents,
+    /// so the standard editing commands (Cmd+A, Cmd+C, Cmd+X, Cmd+Z, …) never
+    /// reach the text view. Dispatch them explicitly here.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let chars = event.charactersIgnoringModifiers ?? ""
+        if mods == .command {
+            switch chars {
+            case "a": selectAll(nil);     return true
+            case "c": copy(nil);          return true
+            case "x": cut(nil);           return true
+            case "v": paste(nil);         return true
+            case "z":
+                undoManager?.undo()
+                return true
+            default: break
+            }
+        }
+        if mods == [.command, .shift] {
+            if chars.lowercased() == "z" {
+                undoManager?.redo()
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
             onCancel?()
             return
         }
         if event.keyCode == 36 || event.keyCode == 76 { // Return / numeric Return
-            if event.modifierFlags.contains(.shift) {
-                super.insertNewline(nil)
+            // Submit on bare Return; pass through to default newline insertion
+            // for Shift+Return (or any other modifier so we don't swallow
+            // command-Return chords if the user binds something to them).
+            let interesting = event.modifierFlags.intersection(
+                [.command, .option, .control, .shift]
+            )
+            if interesting.isEmpty {
+                onSubmit?()
                 return
             }
-            onSubmit?()
-            return
+            if interesting == .shift {
+                insertNewline(nil)
+                return
+            }
         }
         super.keyDown(with: event)
     }
