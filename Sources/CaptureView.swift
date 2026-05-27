@@ -315,9 +315,7 @@ final class CaptureView: NSView, NSTextViewDelegate {
         let pb = NSPasteboard.general
 
         // File URL on the clipboard → file paste (no image preview, copied as file)
-        if let urls = pb.readObjects(forClasses: [NSURL.self],
-                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
-           let firstURL = urls.first {
+        if let firstURL = filesFromPasteboard(pb).first {
             let attrs = try? FileManager.default.attributesOfItem(atPath: firstURL.path)
             if let size = attrs?[.size] as? Int64, size > 100 * 1024 * 1024 {
                 showWarning("File over 100MB — paste discarded. Type a note instead.")
@@ -332,7 +330,7 @@ final class CaptureView: NSView, NSTextViewDelegate {
         }
 
         // Raw image data on the clipboard → image paste (with inline preview)
-        if let data = imageDataFromPasteboard(pb), let img = NSImage(data: data) {
+        if let (data, img) = imageFromPasteboard(pb) {
             pastedImageData = data
             imagePreview.image = img
             imagePreview.isHidden = false
@@ -348,17 +346,66 @@ final class CaptureView: NSView, NSTextViewDelegate {
         return false
     }
 
-    private func imageDataFromPasteboard(_ pb: NSPasteboard) -> Data? {
-        if let png = pb.data(forType: .png) { return png }
-        if let tiff = pb.data(forType: .tiff) { return tiff }
-        if let item = pb.pasteboardItems?.first {
+    /// Read file URLs from the pasteboard, trying every shape Finder /
+    /// command-line / drag-and-drop sources use in practice.
+    private func filesFromPasteboard(_ pb: NSPasteboard) -> [URL] {
+        // Modern API, file-only filter
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            return urls
+        }
+        // Modern API without filter, post-filter to file URLs
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let filtered = urls.filter { $0.isFileURL }
+            if !filtered.isEmpty { return filtered }
+        }
+        // public.file-url on each pasteboard item
+        var collected: [URL] = []
+        for item in pb.pasteboardItems ?? [] {
+            if let s = item.string(forType: .fileURL),
+               let url = URL(string: s), url.isFileURL {
+                collected.append(url)
+            }
+        }
+        if !collected.isEmpty { return collected }
+        // Legacy NSFilenamesPboardType
+        let legacy = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+        if let names = pb.propertyList(forType: legacy) as? [String], !names.isEmpty {
+            return names.map { URL(fileURLWithPath: $0) }
+        }
+        return []
+    }
+
+    /// Read an image off the pasteboard. Tries explicit data types first
+    /// (so we preserve the original encoding for normalization decisions),
+    /// then falls back to `NSImage(pasteboard:)` for everything else.
+    private func imageFromPasteboard(_ pb: NSPasteboard) -> (data: Data, image: NSImage)? {
+        // Explicit data types we want to preserve verbatim
+        let explicitTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
+        for t in explicitTypes {
+            if let data = pb.data(forType: t), let img = NSImage(data: data) {
+                return (data, img)
+            }
+        }
+        // Walk every pasteboard item looking for an image-shaped UTI
+        for item in pb.pasteboardItems ?? [] {
             for type in item.types {
                 let s = type.rawValue.lowercased()
-                if s.contains("png") || s.contains("jpeg") || s.contains("tiff")
-                    || s.contains("gif") || s.contains("webp") || s.contains("heic") {
-                    if let d = item.data(forType: type) { return d }
+                guard s.contains("png") || s.contains("jpeg") || s.contains("jpg")
+                        || s.contains("tiff") || s.contains("gif") || s.contains("webp")
+                        || s.contains("heic") || s.contains("bmp")
+                else { continue }
+                if let data = item.data(forType: type), let img = NSImage(data: data) {
+                    return (data, img)
                 }
             }
+        }
+        // Last resort: let AppKit figure it out. NSImage(pasteboard:) handles
+        // odd flavours (PDF screenshots, drag previews, etc.). We round-trip
+        // through TIFF so we have a concrete Data to write to disk.
+        if let img = NSImage(pasteboard: pb), let tiff = img.tiffRepresentation {
+            return (tiff, img)
         }
         return nil
     }
