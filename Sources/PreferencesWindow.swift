@@ -14,6 +14,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let durationSlider = NSSlider()
     private let durationValueLabel = NSTextField(labelWithString: "100 ms")
     private let normalizationToggle = NSButton(checkboxWithTitle: "Image normalization", target: nil, action: nil)
+    private let loginToggle = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
     private let menuBarNoteHeader = NSTextField(labelWithString: "")
     private let menuBarNoteCode = NSTextField(labelWithString: "")
@@ -109,6 +110,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         normalizationToggle.target = self
         normalizationToggle.action = #selector(normalizationChanged)
 
+        loginToggle.target = self
+        loginToggle.action = #selector(loginToggleChanged)
+
         menuBarToggle.target = self
         menuBarToggle.action = #selector(menuBarChanged)
 
@@ -171,6 +175,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         let imageRow = labeledRow("Image handling:", control: normalizationToggle)
         let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNoteContainer], spacing: 4))
+        let loginRow = labeledRow("Login:", control: loginToggle)
 
         let footer = makeFooter()
 
@@ -178,7 +183,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         separator.boxType = .separator
 
         let stack = verticalStack(
-            [folderRow, hotkeyRow, confirmRow, imageRow, menuBarRow, separator, footer],
+            [folderRow, hotkeyRow, confirmRow, imageRow, menuBarRow, loginRow, separator, footer],
             spacing: 14
         )
         stack.alignment = .leading
@@ -259,6 +264,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         durationValueLabel.alphaValue = prefs.confirmationEnabled ? 1.0 : 0.4
         normalizationToggle.state = prefs.imageNormalization ? .on : .off
         menuBarToggle.state = prefs.menuBarEnabled ? .on : .off
+        loginToggle.state = prefs.startAtLogin ? .on : .off
         updateMenuBarNote()
     }
 
@@ -329,6 +335,10 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func normalizationChanged() {
         prefs.imageNormalization = (normalizationToggle.state == .on)
+    }
+
+    @objc private func loginToggleChanged() {
+        prefs.startAtLogin = (loginToggle.state == .on)
     }
 
     @objc private func menuBarChanged() {

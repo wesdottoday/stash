@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 final class Preferences {
     static let shared = Preferences()
@@ -108,6 +109,21 @@ final class Preferences {
     var hasLaunchedBefore: Bool {
         get { defaults.bool(forKey: Keys.hasLaunchedBefore) }
         set { defaults.set(newValue, forKey: Keys.hasLaunchedBefore) }
+    }
+
+    var startAtLogin: Bool {
+        get { SMAppService.mainApp.status == .enabled }
+        set {
+            do {
+                if newValue {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                // Silent — user can manage via System Settings
+            }
+        }
     }
 }
 

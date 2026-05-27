@@ -21,6 +21,7 @@ all: $(EXEC)
 $(EXEC): $(SWIFT_FILES) Resources/Info.plist
 	@mkdir -p $(EXEC_DIR) $(RES_DIR)
 	@cp Resources/Info.plist $(APP_DIR)/Contents/Info.plist
+	@test -f Resources/AppIcon.icns && cp Resources/AppIcon.icns $(RES_DIR)/ || true
 	@printf 'APPL????' > $(APP_DIR)/Contents/PkgInfo
 	swiftc $(SWIFTC_OPTS) -o $(EXEC) $(SWIFT_FILES)
 	@strip -x $(EXEC) 2>/dev/null || true
@@ -30,9 +31,10 @@ $(EXEC): $(SWIFT_FILES) Resources/Info.plist
 universal: $(SWIFT_FILES) Resources/Info.plist
 	@mkdir -p $(EXEC_DIR) $(RES_DIR)
 	@cp Resources/Info.plist $(APP_DIR)/Contents/Info.plist
+	@test -f Resources/AppIcon.icns && cp Resources/AppIcon.icns $(RES_DIR)/ || true
 	@printf 'APPL????' > $(APP_DIR)/Contents/PkgInfo
-	swiftc $(SWIFTC_OPTS) -target arm64-apple-macos12.0 -o $(BUILD_DIR)/$(APP_NAME)-arm64 $(SWIFT_FILES)
-	swiftc $(SWIFTC_OPTS) -target x86_64-apple-macos12.0 -o $(BUILD_DIR)/$(APP_NAME)-x86_64 $(SWIFT_FILES)
+	swiftc $(SWIFTC_OPTS) -target arm64-apple-macos13.0 -o $(BUILD_DIR)/$(APP_NAME)-arm64 $(SWIFT_FILES)
+	swiftc $(SWIFTC_OPTS) -target x86_64-apple-macos13.0 -o $(BUILD_DIR)/$(APP_NAME)-x86_64 $(SWIFT_FILES)
 	lipo -create $(BUILD_DIR)/$(APP_NAME)-arm64 $(BUILD_DIR)/$(APP_NAME)-x86_64 -output $(EXEC)
 	@strip -x $(EXEC) 2>/dev/null || true
 	@codesign --force --sign - $(APP_DIR)
