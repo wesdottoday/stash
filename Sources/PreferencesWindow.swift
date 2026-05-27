@@ -11,11 +11,29 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let chooseFolderButton = NSButton(title: "Choose…", target: nil, action: nil)
     private let hotkeyField = KeyCaptureField()
     private let confirmToggle = NSButton(checkboxWithTitle: "Show save confirmation", target: nil, action: nil)
-    private let durationField = NSTextField(string: "100")
-    private let durationStepper = NSStepper()
+    private let durationSlider = NSSlider()
+    private let durationValueLabel = NSTextField(labelWithString: "100 ms")
     private let normalizationToggle = NSButton(checkboxWithTitle: "Image normalization", target: nil, action: nil)
+    private let loginToggle = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
-    private let menuBarNote = NSTextField(labelWithString: "")
+    private let menuBarNoteHeader = NSTextField(labelWithString: "")
+    private let menuBarNoteCode = NSTextField(labelWithString: "")
+    private let menuBarNoteCopyButton = NSButton(title: "Copy", target: nil, action: nil)
+    private let menuBarNoteDocsLink = NSButton(title: "", target: nil, action: nil)
+    private lazy var menuBarNoteCodeRow: NSStackView = {
+        let s = NSStackView(views: [menuBarNoteCode, menuBarNoteCopyButton])
+        s.orientation = .horizontal
+        s.alignment = .firstBaseline
+        s.spacing = 6
+        return s
+    }()
+    private lazy var menuBarNoteContainer: NSStackView = {
+        let s = NSStackView(views: [menuBarNoteHeader, menuBarNoteCodeRow, menuBarNoteDocsLink])
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 2
+        return s
+    }()
 
     convenience init() {
         let window = NSWindow(
@@ -33,6 +51,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
+        // Always reload from defaults on show so external changes via
+        // `defaults write` are reflected in the UI.
+        loadFromPreferences()
         if let w = window {
             w.center()
             w.makeKeyAndOrderFront(nil)
@@ -72,29 +93,67 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         confirmToggle.target = self
         confirmToggle.action = #selector(confirmToggleChanged)
-        durationField.target = self
-        durationField.action = #selector(durationFieldChanged)
-        durationField.alignment = .right
-        durationField.placeholderString = "100"
-        durationField.formatter = makeIntegerFormatter(min: 50, max: 500)
 
-        durationStepper.minValue = 50
-        durationStepper.maxValue = 500
-        durationStepper.increment = 10
-        durationStepper.valueWraps = false
-        durationStepper.target = self
-        durationStepper.action = #selector(durationStepperChanged)
+        let range = Preferences.confirmationDurationRange
+        durationSlider.minValue = Double(range.lowerBound)
+        durationSlider.maxValue = Double(range.upperBound)
+        durationSlider.isContinuous = true
+        durationSlider.allowsTickMarkValuesOnly = false
+        durationSlider.target = self
+        durationSlider.action = #selector(durationSliderChanged)
+        durationSlider.controlSize = .small
+
+        durationValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        durationValueLabel.textColor = .secondaryLabelColor
+        durationValueLabel.alignment = .right
 
         normalizationToggle.target = self
         normalizationToggle.action = #selector(normalizationChanged)
 
+        loginToggle.target = self
+        loginToggle.action = #selector(loginToggleChanged)
+
         menuBarToggle.target = self
         menuBarToggle.action = #selector(menuBarChanged)
 
-        menuBarNote.font = .systemFont(ofSize: 11)
-        menuBarNote.textColor = .secondaryLabelColor
-        menuBarNote.maximumNumberOfLines = 3
-        menuBarNote.lineBreakMode = .byWordWrapping
+        menuBarNoteHeader.font = .systemFont(ofSize: 11)
+        menuBarNoteHeader.textColor = .secondaryLabelColor
+        menuBarNoteHeader.usesSingleLineMode = false
+        menuBarNoteHeader.maximumNumberOfLines = 2
+
+        menuBarNoteCode.font = .userFixedPitchFont(ofSize: 10) ?? .monospacedSystemFont(ofSize: 10, weight: .regular)
+        menuBarNoteCode.textColor = .secondaryLabelColor
+        menuBarNoteCode.usesSingleLineMode = true
+        menuBarNoteCode.lineBreakMode = .byTruncatingTail
+        // Allow click-drag selection and Cmd-C so the user can lift the
+        // command line out of the prefs pane without retyping it.
+        menuBarNoteCode.isSelectable = true
+        menuBarNoteCode.allowsEditingTextAttributes = false
+
+        menuBarNoteCopyButton.controlSize = .small
+        menuBarNoteCopyButton.bezelStyle = .rounded
+        menuBarNoteCopyButton.font = .systemFont(ofSize: 11)
+        menuBarNoteCopyButton.target = self
+        menuBarNoteCopyButton.action = #selector(copyMenuBarHintCommand)
+
+        menuBarNoteDocsLink.target = self
+        menuBarNoteDocsLink.action = #selector(openSourceLink)
+        menuBarNoteDocsLink.isBordered = false
+        menuBarNoteDocsLink.bezelStyle = .recessed
+        menuBarNoteDocsLink.font = .systemFont(ofSize: 11)
+        menuBarNoteDocsLink.attributedTitle = NSAttributedString(
+            string: "Docs: github.com/wesdottoday/stash",
+            attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .font: NSFont.systemFont(ofSize: 11),
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ]
+        )
+        menuBarNoteDocsLink.setButtonType(.momentaryChange)
+        if let cell = menuBarNoteDocsLink.cell as? NSButtonCell {
+            cell.imagePosition = .noImage
+            cell.bezelStyle = .recessed
+        }
 
         let folderRow = labeledRow(
             "Destination folder:",
@@ -106,12 +165,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         let hotkeyRow = labeledRow("Global hotkey:", control: hotkeyField)
 
-        let durationRow = horizontalStack([durationField, durationStepper, label("ms")], spacing: 6)
+        let durationRow = horizontalStack([durationSlider, durationValueLabel], spacing: 8)
+        durationSlider.translatesAutoresizingMaskIntoConstraints = false
+        durationSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        durationValueLabel.translatesAutoresizingMaskIntoConstraints = false
+        durationValueLabel.widthAnchor.constraint(equalToConstant: 72).isActive = true
         let confirmRow = labeledRow("Save confirmation:",
                                     control: verticalStack([confirmToggle, durationRow], spacing: 6))
 
         let imageRow = labeledRow("Image handling:", control: normalizationToggle)
-        let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNote], spacing: 4))
+        let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNoteContainer], spacing: 4))
+        let loginRow = labeledRow("Login:", control: loginToggle)
 
         let footer = makeFooter()
 
@@ -119,7 +183,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         separator.boxType = .separator
 
         let stack = verticalStack(
-            [folderRow, hotkeyRow, confirmRow, imageRow, menuBarRow, separator, footer],
+            [folderRow, hotkeyRow, confirmRow, imageRow, menuBarRow, loginRow, separator, footer],
             spacing: 14
         )
         stack.alignment = .leading
@@ -133,7 +197,6 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -18),
             folderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
             hotkeyField.widthAnchor.constraint(equalToConstant: 160),
-            durationField.widthAnchor.constraint(equalToConstant: 70),
         ])
     }
 
@@ -189,42 +252,44 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         return s
     }
 
-    private func label(_ text: String) -> NSTextField {
-        let l = NSTextField(labelWithString: text)
-        l.textColor = .secondaryLabelColor
-        l.font = .systemFont(ofSize: 12)
-        return l
-    }
-
-    private func makeIntegerFormatter(min: Int, max: Int) -> NumberFormatter {
-        let f = NumberFormatter()
-        f.allowsFloats = false
-        f.minimum = NSNumber(value: min)
-        f.maximum = NSNumber(value: max)
-        f.maximumFractionDigits = 0
-        return f
-    }
-
     // MARK: - Load / Save ----------------------------------------------------
 
     private func loadFromPreferences() {
         folderField.stringValue = (prefs.destinationFolder as NSString).abbreviatingWithTildeInPath
         hotkeyField.setBinding(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
         confirmToggle.state = prefs.confirmationEnabled ? .on : .off
-        durationField.stringValue = String(prefs.confirmationDuration)
-        durationStepper.integerValue = prefs.confirmationDuration
-        durationField.isEnabled = prefs.confirmationEnabled
-        durationStepper.isEnabled = prefs.confirmationEnabled
+        durationSlider.integerValue = prefs.confirmationDuration
+        durationValueLabel.stringValue = "\(prefs.confirmationDuration) ms"
+        durationSlider.isEnabled = prefs.confirmationEnabled
+        durationValueLabel.alphaValue = prefs.confirmationEnabled ? 1.0 : 0.4
         normalizationToggle.state = prefs.imageNormalization ? .on : .off
         menuBarToggle.state = prefs.menuBarEnabled ? .on : .off
+        loginToggle.state = prefs.startAtLogin ? .on : .off
         updateMenuBarNote()
     }
 
     private func updateMenuBarNote() {
-        if prefs.menuBarEnabled {
-            menuBarNote.stringValue = ""
-        } else {
-            menuBarNote.stringValue = "Hidden. Re-enable via the command line:\n  defaults write com.wesdottoday.stash menuBarEnabled -bool true\nDocs: github.com/wesdottoday/stash"
+        let visible = !prefs.menuBarEnabled
+        menuBarNoteHeader.stringValue = visible ? "Hidden. Re-enable via the command line:" : ""
+        menuBarNoteCode.stringValue   = visible ? Self.menuBarHintCommand : ""
+        menuBarNoteHeader.isHidden = !visible
+        menuBarNoteCodeRow.isHidden = !visible
+        menuBarNoteCode.isHidden   = !visible
+        menuBarNoteCopyButton.isHidden = !visible
+        menuBarNoteDocsLink.isHidden = !visible
+    }
+
+    private static let menuBarHintCommand = "defaults write com.wesdottoday.stash menuBarEnabled -bool true"
+
+    @objc private func copyMenuBarHintCommand() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(Self.menuBarHintCommand, forType: .string)
+        // Tiny visual ack — flip the title for a moment so the user knows it
+        // worked, since the pasteboard is otherwise invisible.
+        menuBarNoteCopyButton.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in
+            self?.menuBarNoteCopyButton.title = "Copy"
         }
     }
 
@@ -254,26 +319,26 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func confirmToggleChanged() {
-        prefs.confirmationEnabled = (confirmToggle.state == .on)
-        durationField.isEnabled = prefs.confirmationEnabled
-        durationStepper.isEnabled = prefs.confirmationEnabled
+        let enabled = (confirmToggle.state == .on)
+        prefs.confirmationEnabled = enabled
+        durationSlider.isEnabled = enabled
+        durationValueLabel.alphaValue = enabled ? 1.0 : 0.4
     }
 
-    @objc private func durationFieldChanged() {
-        let v = max(50, min(500, durationField.integerValue))
-        prefs.confirmationDuration = v
-        durationField.integerValue = v
-        durationStepper.integerValue = v
-    }
-
-    @objc private func durationStepperChanged() {
-        let v = max(50, min(500, durationStepper.integerValue))
-        prefs.confirmationDuration = v
-        durationField.integerValue = v
+    @objc private func durationSliderChanged() {
+        // Round to nearest 10 ms while dragging for less jitter on the label.
+        let raw = durationSlider.integerValue
+        let snapped = ((raw + 5) / 10) * 10
+        prefs.confirmationDuration = snapped
+        durationValueLabel.stringValue = "\(snapped) ms"
     }
 
     @objc private func normalizationChanged() {
         prefs.imageNormalization = (normalizationToggle.state == .on)
+    }
+
+    @objc private func loginToggleChanged() {
+        prefs.startAtLogin = (loginToggle.state == .on)
     }
 
     @objc private func menuBarChanged() {

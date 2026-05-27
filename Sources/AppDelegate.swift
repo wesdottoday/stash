@@ -10,6 +10,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isWindowVisible = false
     private var pendingSourceApp: String?
 
+    // Snapshot of the last-applied preference values, so we can tell which
+    // keys actually changed when UserDefaults.didChangeNotification fires.
+    private var snapMenuBarEnabled: Bool = true
+    private var snapHotkeyKeyCode: UInt32 = 0
+    private var snapHotkeyModifiers: NSEvent.ModifierFlags = []
+    private var snapDestinationFolder: String = ""
+
+    // Periodic sync so out-of-process `defaults write` from the CLI is
+    // picked up — UserDefaults' in-memory cache doesn't always notice when
+    // the plist is rewritten beneath us, so didChangeNotification alone is
+    // insufficient.
+    private var defaultsSyncTimer: Timer?
+    private let defaultsSyncInterval: TimeInterval = 2.0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Pre-create the capture window so the hotkey is instant.
         captureWindow = CaptureWindow()
@@ -26,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController()
         menuBar.onPreferences = { [weak self] in self?.showPreferences() }
         menuBar.onQuit = { NSApp.terminate(nil) }
-        if prefs.menuBarEnabled { menuBar.install() }
+        applyMenuBarVisibility(prefs.menuBarEnabled)
 
         // Hotkey
         hotkey = HotkeyManager()
@@ -42,6 +56,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  cocoaModifiers: self.prefs.hotkeyModifiers)
         }
 
+        // Pick up external preference changes (`defaults write …`) live.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(defaultsChanged(_:)),
+            name: UserDefaults.didChangeNotification,
+            object: nil
+        )
+        cachePreferenceSnapshot()
+        startDefaultsSyncTimer()
+
         // First launch: show preferences.
         if !prefs.hasLaunchedBefore {
             prefs.hasLaunchedBefore = true
@@ -50,8 +74,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        defaultsSyncTimer?.invalidate()
+        defaultsSyncTimer = nil
         hotkey?.unregister()
         menuBar?.uninstall()
+    }
+
+    // MARK: - Defaults reload -------------------------------------------------
+
+    /// Install or remove the menu bar icon AND switch the activation policy.
+    ///
+    /// When the menu bar is hidden, switch to .regular so the app shows in
+    /// the Dock and Force Quit — without that fallback the user has no GUI
+    /// route to quit. When the menu bar is back, switch to .accessory to
+    /// disappear from the Dock and Cmd-Tab again.
+    private func applyMenuBarVisibility(_ enabled: Bool) {
+        if enabled {
+            menuBar.install()
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            menuBar.uninstall()
+            NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    private func cachePreferenceSnapshot() {
+        snapMenuBarEnabled = prefs.menuBarEnabled
+        snapHotkeyKeyCode  = prefs.hotkeyKeyCode
+        snapHotkeyModifiers = prefs.hotkeyModifiers
+        snapDestinationFolder = prefs.destinationFolder
+    }
+
+    @objc private func defaultsChanged(_ note: Notification) {
+        reconcilePreferences()
+    }
+
+    /// Compare each preference against the cached snapshot and apply the
+    /// runtime effect of anything that changed. Called both from
+    /// didChangeNotification (in-process writes) and from the periodic poll
+    /// (external `defaults write` from the CLI).
+    private func reconcilePreferences() {
+        let menuBar = prefs.menuBarEnabled
+        if menuBar != snapMenuBarEnabled {
+            snapMenuBarEnabled = menuBar
+            applyMenuBarVisibility(menuBar)
+        }
+
+        let kc = prefs.hotkeyKeyCode
+        let mods = prefs.hotkeyModifiers
+        if kc != snapHotkeyKeyCode || mods != snapHotkeyModifiers {
+            snapHotkeyKeyCode = kc
+            snapHotkeyModifiers = mods
+            hotkey.register(keyCode: kc, cocoaModifiers: mods)
+        }
+
+        let dest = prefs.destinationFolder
+        if dest != snapDestinationFolder {
+            snapDestinationFolder = dest
+            _ = ContentHandler.ensureDirectory(prefs.destinationFolderURL)
+        }
+    }
+
+    private func startDefaultsSyncTimer() {
+        defaultsSyncTimer?.invalidate()
+        let timer = Timer(timeInterval: defaultsSyncInterval, repeats: true) { [weak self] _ in
+            self?.syncDefaultsFromDisk()
+        }
+        // Use .common so the poll keeps ticking during tracking-mode runs
+        // (e.g. while the user is dragging the duration slider).
+        RunLoop.main.add(timer, forMode: .common)
+        defaultsSyncTimer = timer
+    }
+
+    private func syncDefaultsFromDisk() {
+        // synchronize() is documented as deprecated for normal use because
+        // UserDefaults usually auto-syncs in-process. For our purpose —
+        // detecting out-of-process plist writes from `defaults write` — it
+        // is still the documented mechanism and the only public API that
+        // forces a re-read.
+        UserDefaults.standard.synchronize()
+        reconcilePreferences()
     }
 
     // MARK: - Hotkey ----------------------------------------------------------
@@ -148,8 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.hotkey.register(keyCode: kc, cocoaModifiers: mods)
             }
             preferencesController?.onMenuBarChanged = { [weak self] enabled in
-                guard let self = self else { return }
-                if enabled { self.menuBar.install() } else { self.menuBar.uninstall() }
+                self?.applyMenuBarVisibility(enabled)
             }
             preferencesController?.onHotkeyCaptureBegin = { [weak self] in
                 self?.hotkey.unregister()

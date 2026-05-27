@@ -1,7 +1,10 @@
 import AppKit
 import Carbon.HIToolbox
 
-final class KeyCaptureField: NSTextField {
+/// A click-to-focus field that captures a single key combination. Unlike
+/// NSTextField it isn't backed by a field editor, so mouseDown reliably
+/// makes it first responder and keyDown reaches us directly.
+final class KeyCaptureField: NSControl {
     var onCapture: ((UInt32, NSEvent.ModifierFlags) -> Void)?
     var onWillBeginCapture: (() -> Void)?
     var onDidEndCapture: (() -> Void)?
@@ -9,77 +12,129 @@ final class KeyCaptureField: NSTextField {
     private(set) var keyCode: UInt32 = UInt32(Preferences.defaultHotkeyKeyCode)
     private(set) var modifiers: NSEvent.ModifierFlags = NSEvent.ModifierFlags(rawValue: Preferences.defaultHotkeyModifiers)
 
+    private var isCapturing = false
+
     override init(frame: NSRect) {
         super.init(frame: frame)
-        setup()
-    }
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        isEditable = false
-        isSelectable = false
-        isBezeled = true
-        bezelStyle = .roundedBezel
-        alignment = .center
-        usesSingleLineMode = true
+        wantsLayer = true
         focusRingType = .default
-        refreshDisplay()
     }
+    required init?(coder: NSCoder) { nil }
 
     func setBinding(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) {
         self.keyCode = keyCode
         self.modifiers = modifiers
-        refreshDisplay()
+        needsDisplay = true
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    // MARK: - Responder behaviour --------------------------------------------
+
+    override var acceptsFirstResponder: Bool { isEnabled }
+    override var canBecomeKeyView: Bool { isEnabled }
+    override var needsPanelToBecomeKey: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 160, height: 22)
+    }
 
     override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        if ok {
-            stringValue = "Press a key…"
-            onWillBeginCapture?()
-        }
-        return ok
+        guard super.becomeFirstResponder() else { return false }
+        isCapturing = true
+        needsDisplay = true
+        onWillBeginCapture?()
+        return true
     }
 
     override func resignFirstResponder() -> Bool {
-        refreshDisplay()
+        isCapturing = false
+        needsDisplay = true
         onDidEndCapture?()
         return super.resignFirstResponder()
     }
 
+    override func mouseDown(with event: NSEvent) {
+        if !isCapturing { window?.makeFirstResponder(self) }
+    }
+
+    // MARK: - Key handling ----------------------------------------------------
+
     override func keyDown(with event: NSEvent) {
-        // Modifier-only keys are filtered out by the OS keyDown.
-        let mods: NSEvent.ModifierFlags = event.modifierFlags.intersection(
+        captureChord(from: event)
+    }
+
+    /// Cmd-modified events normally route through `performKeyEquivalent` and
+    /// would otherwise be consumed by the window's default chain. Intercept
+    /// them while we're capturing so the user can bind chords containing Cmd.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isCapturing, window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
+        captureChord(from: event)
+        return true
+    }
+
+    private func captureChord(from event: NSEvent) {
+        // Pressing just Esc cancels capture without changing the binding.
+        if event.keyCode == UInt16(kVK_Escape) {
+            isCapturing = false
+            needsDisplay = true
+            window?.makeFirstResponder(nil)
+            return
+        }
+        let mods = event.modifierFlags.intersection(
             [.command, .option, .control, .shift]
         )
         guard !mods.isEmpty else {
-            // Just a plain key — refuse and keep editing.
             NSSound.beep()
             return
         }
         keyCode = UInt32(event.keyCode)
         modifiers = mods
-        refreshDisplay()
+        isCapturing = false
+        needsDisplay = true
         onCapture?(keyCode, modifiers)
         window?.makeFirstResponder(nil)
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if window?.firstResponder === self {
-            keyDown(with: event)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
+    // MARK: - Drawing ---------------------------------------------------------
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bezel = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: bezel, xRadius: 4, yRadius: 4)
+        NSColor.textBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let text = isCapturing
+            ? "Press a key…"
+            : KeyCaptureField.describe(keyCode: keyCode, modifiers: modifiers)
+        let color: NSColor = isCapturing ? .tertiaryLabelColor : .labelColor
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: color
+        ]
+        let attr = NSAttributedString(string: text, attributes: attrs)
+        let size = attr.size()
+        let textRect = NSRect(
+            x: (bounds.width - size.width) / 2,
+            y: (bounds.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+        attr.draw(in: textRect)
     }
 
-    private func refreshDisplay() {
-        stringValue = KeyCaptureField.describe(keyCode: keyCode, modifiers: modifiers)
+    override func drawFocusRingMask() {
+        let bezel = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: bezel, xRadius: 4, yRadius: 4)
+        path.fill()
     }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    // MARK: - Description -----------------------------------------------------
 
     static func describe(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) -> String {
         var parts: [String] = []

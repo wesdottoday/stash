@@ -22,6 +22,7 @@ final class CaptureView: NSView, NSTextViewDelegate {
     // MARK: - Subviews
     private let visualEffect = NSVisualEffectView()
     private let imagePreview = NSImageView()
+    private let attachmentChip = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     let textView = CaptureTextView()
     private let hintLabel = NSTextField(labelWithString: "↵ to save.")
@@ -33,7 +34,10 @@ final class CaptureView: NSView, NSTextViewDelegate {
     private var pastedFileURL: URL?
     private var hasUserInteraction = false
     private var imageVisible = false
+    private var attachmentChipVisible = false
     private var warningVisible = false
+    private let attachmentChipHeight: CGFloat = 22
+    private let attachmentChipSpacing: CGFloat = 6
 
     var sourceApp: String?
 
@@ -146,7 +150,18 @@ final class CaptureView: NSView, NSTextViewDelegate {
         warningLabel.alignment = .left
         warningLabel.isHidden = true
 
+        // Attachment chip — shows filename/size when a file is pasted
+        attachmentChip.font = .systemFont(ofSize: 12, weight: .medium)
+        attachmentChip.textColor = .secondaryLabelColor
+        attachmentChip.isEditable = false
+        attachmentChip.isBordered = false
+        attachmentChip.drawsBackground = false
+        attachmentChip.usesSingleLineMode = true
+        attachmentChip.lineBreakMode = .byTruncatingMiddle
+        attachmentChip.isHidden = true
+
         addSubview(imagePreview)
+        addSubview(attachmentChip)
         addSubview(scrollView)
         addSubview(hintLabel)
         addSubview(confirmationLabel)
@@ -176,6 +191,13 @@ final class CaptureView: NSView, NSTextViewDelegate {
             }
             imagePreview.frame = NSRect(x: contentLeft, y: cursorY - h, width: w, height: h)
             cursorY -= (h + imagePreviewSpacing)
+        }
+
+        // Attachment chip (above text field, under image preview if any)
+        if attachmentChipVisible {
+            attachmentChip.frame = NSRect(x: contentLeft, y: cursorY - attachmentChipHeight,
+                                          width: contentWidth, height: attachmentChipHeight)
+            cursorY -= (attachmentChipHeight + attachmentChipSpacing)
         }
 
         // Warning (just under image preview, above text field)
@@ -221,6 +243,9 @@ final class CaptureView: NSView, NSTextViewDelegate {
         imagePreview.image = nil
         imagePreview.isHidden = true
         imageVisible = false
+        attachmentChip.stringValue = ""
+        attachmentChip.isHidden = true
+        attachmentChipVisible = false
         warningLabel.stringValue = ""
         warningLabel.isHidden = true
         warningVisible = false
@@ -258,6 +283,9 @@ final class CaptureView: NSView, NSTextViewDelegate {
             }
             _ = w
             total += h + imagePreviewSpacing
+        }
+        if attachmentChipVisible {
+            total += attachmentChipHeight + attachmentChipSpacing
         }
         if warningVisible {
             total += warningHeight + warningSpacing
@@ -307,6 +335,26 @@ final class CaptureView: NSView, NSTextViewDelegate {
         onContentHeightChange?(preferredHeight())
     }
 
+    // MARK: - Attachment chip -------------------------------------------------
+
+    private func showAttachmentChip(label: String) {
+        attachmentChip.stringValue = label
+        attachmentChip.isHidden = false
+        attachmentChipVisible = true
+        needsLayout = true
+    }
+
+    private static let fileSizeFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useKB, .useMB, .useGB]
+        f.countStyle = .file
+        return f
+    }()
+
+    private func humanFileSize(_ size: Int64) -> String {
+        Self.fileSizeFormatter.string(fromByteCount: size)
+    }
+
     // MARK: - Paste -----------------------------------------------------------
 
     /// Returns true if paste was consumed (image or file). False to let the
@@ -315,15 +363,16 @@ final class CaptureView: NSView, NSTextViewDelegate {
         let pb = NSPasteboard.general
 
         // File URL on the clipboard → file paste (no image preview, copied as file)
-        if let urls = pb.readObjects(forClasses: [NSURL.self],
-                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
-           let firstURL = urls.first {
+        if let firstURL = filesFromPasteboard(pb).first {
             let attrs = try? FileManager.default.attributesOfItem(atPath: firstURL.path)
-            if let size = attrs?[.size] as? Int64, size > 100 * 1024 * 1024 {
+            let size = attrs?[.size] as? Int64 ?? 0
+            if size > 100 * 1024 * 1024 {
                 showWarning("File over 100MB — paste discarded. Type a note instead.")
                 return true
             }
             pastedFileURL = firstURL
+            showAttachmentChip(label: "📎 \(firstURL.lastPathComponent)" +
+                               (size > 0 ? "  · \(humanFileSize(size))" : ""))
             hasUserInteraction = true
             hintLabel.isHidden = true
             needsLayout = true
@@ -332,7 +381,7 @@ final class CaptureView: NSView, NSTextViewDelegate {
         }
 
         // Raw image data on the clipboard → image paste (with inline preview)
-        if let data = imageDataFromPasteboard(pb), let img = NSImage(data: data) {
+        if let (data, img) = imageFromPasteboard(pb) {
             pastedImageData = data
             imagePreview.image = img
             imagePreview.isHidden = false
@@ -348,17 +397,66 @@ final class CaptureView: NSView, NSTextViewDelegate {
         return false
     }
 
-    private func imageDataFromPasteboard(_ pb: NSPasteboard) -> Data? {
-        if let png = pb.data(forType: .png) { return png }
-        if let tiff = pb.data(forType: .tiff) { return tiff }
-        if let item = pb.pasteboardItems?.first {
+    /// Read file URLs from the pasteboard, trying every shape Finder /
+    /// command-line / drag-and-drop sources use in practice.
+    private func filesFromPasteboard(_ pb: NSPasteboard) -> [URL] {
+        // Modern API, file-only filter
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            return urls
+        }
+        // Modern API without filter, post-filter to file URLs
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let filtered = urls.filter { $0.isFileURL }
+            if !filtered.isEmpty { return filtered }
+        }
+        // public.file-url on each pasteboard item
+        var collected: [URL] = []
+        for item in pb.pasteboardItems ?? [] {
+            if let s = item.string(forType: .fileURL),
+               let url = URL(string: s), url.isFileURL {
+                collected.append(url)
+            }
+        }
+        if !collected.isEmpty { return collected }
+        // Legacy NSFilenamesPboardType
+        let legacy = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+        if let names = pb.propertyList(forType: legacy) as? [String], !names.isEmpty {
+            return names.map { URL(fileURLWithPath: $0) }
+        }
+        return []
+    }
+
+    /// Read an image off the pasteboard. Tries explicit data types first
+    /// (so we preserve the original encoding for normalization decisions),
+    /// then falls back to `NSImage(pasteboard:)` for everything else.
+    private func imageFromPasteboard(_ pb: NSPasteboard) -> (data: Data, image: NSImage)? {
+        // Explicit data types we want to preserve verbatim
+        let explicitTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
+        for t in explicitTypes {
+            if let data = pb.data(forType: t), let img = NSImage(data: data) {
+                return (data, img)
+            }
+        }
+        // Walk every pasteboard item looking for an image-shaped UTI
+        for item in pb.pasteboardItems ?? [] {
             for type in item.types {
                 let s = type.rawValue.lowercased()
-                if s.contains("png") || s.contains("jpeg") || s.contains("tiff")
-                    || s.contains("gif") || s.contains("webp") || s.contains("heic") {
-                    if let d = item.data(forType: type) { return d }
+                guard s.contains("png") || s.contains("jpeg") || s.contains("jpg")
+                        || s.contains("tiff") || s.contains("gif") || s.contains("webp")
+                        || s.contains("heic") || s.contains("bmp")
+                else { continue }
+                if let data = item.data(forType: type), let img = NSImage(data: data) {
+                    return (data, img)
                 }
             }
+        }
+        // Last resort: let AppKit figure it out. NSImage(pasteboard:) handles
+        // odd flavours (PDF screenshots, drag previews, etc.). We round-trip
+        // through TIFF so we have a concrete Data to write to disk.
+        if let img = NSImage(pasteboard: pb), let tiff = img.tiffRepresentation {
+            return (tiff, img)
         }
         return nil
     }
@@ -391,18 +489,53 @@ final class CaptureTextView: NSTextView {
         super.paste(sender)
     }
 
+    /// Borderless windows don't get the system main menu's key equivalents,
+    /// so the standard editing commands (Cmd+A, Cmd+C, Cmd+X, Cmd+Z, …) never
+    /// reach the text view. Dispatch them explicitly here.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let chars = event.charactersIgnoringModifiers ?? ""
+        if mods == .command {
+            switch chars {
+            case "a": selectAll(nil);     return true
+            case "c": copy(nil);          return true
+            case "x": cut(nil);           return true
+            case "v": paste(nil);         return true
+            case "z":
+                undoManager?.undo()
+                return true
+            default: break
+            }
+        }
+        if mods == [.command, .shift] {
+            if chars.lowercased() == "z" {
+                undoManager?.redo()
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
             onCancel?()
             return
         }
         if event.keyCode == 36 || event.keyCode == 76 { // Return / numeric Return
-            if event.modifierFlags.contains(.shift) {
-                super.insertNewline(nil)
+            // Submit on bare Return; pass through to default newline insertion
+            // for Shift+Return (or any other modifier so we don't swallow
+            // command-Return chords if the user binds something to them).
+            let interesting = event.modifierFlags.intersection(
+                [.command, .option, .control, .shift]
+            )
+            if interesting.isEmpty {
+                onSubmit?()
                 return
             }
-            onSubmit?()
-            return
+            if interesting == .shift {
+                insertNewline(nil)
+                return
+            }
         }
         super.keyDown(with: event)
     }

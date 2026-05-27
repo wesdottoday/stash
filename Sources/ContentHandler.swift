@@ -102,9 +102,12 @@ enum ContentHandler {
         }
 
         if let fileURL = payload.pastedFileURL {
-            switch copyFileForAttachment(from: fileURL, destination: destination, prefs: prefs) {
+            switch copyFileForAttachment(from: fileURL,
+                                         attachmentsDir: attachmentsDir,
+                                         prefs: prefs)
+            {
             case .ok(let name):
-                attachmentLines.append("[\(name)](./\(name))")
+                attachmentLines.append("[\(name)](attachments/\(name))")
             case .tooLarge:
                 attachmentLines.append("> _stash: file exceeded 100MB limit, not attached_")
             case .error:
@@ -228,13 +231,14 @@ enum ContentHandler {
     }
 
     private static func copyFileForAttachment(from src: URL,
-                                              destination: URL,
+                                              attachmentsDir: URL,
                                               prefs: Preferences) -> AttachmentCopy
     {
         if fileSize(src) ?? 0 > maxFileSize { return .tooLarge }
+        guard ensureDirectory(attachmentsDir) else { return .error }
         let original = src.lastPathComponent
         let name = prefs.imageNormalization ? ImageNormalizer.normalizeFilename(original) : original
-        let dst = uniqueDestination(in: destination, preferredName: name)
+        let dst = uniqueDestination(in: attachmentsDir, preferredName: name)
         do {
             try fm.copyItem(at: src, to: dst)
             return .ok(name: dst.lastPathComponent)
