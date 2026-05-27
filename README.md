@@ -25,6 +25,23 @@ stash eliminates the friction between "I want to keep this" and "it's on disk." 
 | Bundle size | < 5MB |
 | Cold launch to ready | < 200ms |
 
+## Install
+
+**Requires macOS 13 (Ventura) or later.**
+
+### Download
+
+Grab the latest DMG from [Releases](https://github.com/wesdottoday/stash/releases), open it, and drag stash.app to Applications.
+
+### Build from source
+
+```bash
+git clone https://github.com/wesdottoday/stash.git
+cd stash
+make
+make install   # copies to /Applications
+```
+
 ## Architecture
 
 - Native macOS, system frameworks only (AppKit, Foundation, ApplicationServices, Network)
