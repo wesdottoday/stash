@@ -2,19 +2,27 @@ import AppKit
 
 final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     var onHotkeyChanged: ((UInt32, NSEvent.ModifierFlags) -> Void)?
+    var onVoiceHotkeyChanged: ((UInt32, NSEvent.ModifierFlags) -> Void)?
     var onMenuBarChanged: ((Bool) -> Void)?
     var onHotkeyCaptureBegin: (() -> Void)?
     var onHotkeyCaptureEnd: (() -> Void)?
+    var onLinkDevice: (() -> Void)?
+    /// Provides a live one-line relay/consumer status (connection, waiting, drain age).
+    var relayStatusText: (() -> String)?
 
     private let prefs = Preferences.shared
     private let folderField = NSTextField(string: "")
     private let chooseFolderButton = NSButton(title: "Choose…", target: nil, action: nil)
     private let hotkeyField = KeyCaptureField()
+    private let voiceHotkeyField = KeyCaptureField()
+    private var statusTimer: Timer?
     private let confirmToggle = NSButton(checkboxWithTitle: "Show save confirmation", target: nil, action: nil)
     private let durationSlider = NSSlider()
     private let durationValueLabel = NSTextField(labelWithString: "100 ms")
     private let normalizationToggle = NSButton(checkboxWithTitle: "Image normalization", target: nil, action: nil)
     private let loginToggle = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
+    private let relayStatusLabel = NSTextField(labelWithString: "")
+    private let linkDeviceButton = NSButton(title: "Link a device…", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show menu bar icon", target: nil, action: nil)
     private let menuBarNoteHeader = NSTextField(labelWithString: "")
     private let menuBarNoteCode = NSTextField(labelWithString: "")
@@ -37,7 +45,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 490),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -59,6 +67,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+        startStatusTimer()
+    }
+
+    /// While the window is open, refresh the live relay status line every 2s.
+    private func startStatusTimer() {
+        statusTimer?.invalidate()
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshRelayStatus()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        statusTimer = timer
     }
 
     // MARK: - Layout ----------------------------------------------------------
@@ -91,6 +110,18 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             self?.onHotkeyCaptureEnd?()
         }
 
+        voiceHotkeyField.onCapture = { [weak self] kc, mods in
+            self?.prefs.voiceHotkeyKeyCode = kc
+            self?.prefs.voiceHotkeyModifiers = mods
+            self?.onVoiceHotkeyChanged?(kc, mods)
+        }
+        voiceHotkeyField.onWillBeginCapture = { [weak self] in
+            self?.onHotkeyCaptureBegin?()
+        }
+        voiceHotkeyField.onDidEndCapture = { [weak self] in
+            self?.onHotkeyCaptureEnd?()
+        }
+
         confirmToggle.target = self
         confirmToggle.action = #selector(confirmToggleChanged)
 
@@ -109,6 +140,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         normalizationToggle.target = self
         normalizationToggle.action = #selector(normalizationChanged)
+
+        relayStatusLabel.font = .systemFont(ofSize: 12)
+        relayStatusLabel.textColor = .secondaryLabelColor
+        relayStatusLabel.usesSingleLineMode = false
+        relayStatusLabel.maximumNumberOfLines = 3
+        relayStatusLabel.lineBreakMode = .byTruncatingTail
+
+        linkDeviceButton.bezelStyle = .rounded
+        linkDeviceButton.controlSize = .regular
+        linkDeviceButton.target = self
+        linkDeviceButton.action = #selector(linkDeviceClicked)
 
         loginToggle.target = self
         loginToggle.action = #selector(loginToggleChanged)
@@ -164,6 +206,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         folderField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let hotkeyRow = labeledRow("Global hotkey:", control: hotkeyField)
+        let voiceHotkeyRow = labeledRow("Voice hotkey:", control: voiceHotkeyField)
 
         let durationRow = horizontalStack([durationSlider, durationValueLabel], spacing: 8)
         durationSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -174,6 +217,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
                                     control: verticalStack([confirmToggle, durationRow], spacing: 6))
 
         let imageRow = labeledRow("Image handling:", control: normalizationToggle)
+        let syncRow = labeledRow("Sync:", control: verticalStack([relayStatusLabel, linkDeviceButton], spacing: 6))
         let menuBarRow = labeledRow("Menu bar icon:", control: verticalStack([menuBarToggle, menuBarNoteContainer], spacing: 4))
         let loginRow = labeledRow("Login:", control: loginToggle)
 
@@ -183,7 +227,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         separator.boxType = .separator
 
         let stack = verticalStack(
-            [folderRow, hotkeyRow, confirmRow, imageRow, menuBarRow, loginRow, separator, footer],
+            [folderRow, hotkeyRow, voiceHotkeyRow, confirmRow, imageRow, syncRow, menuBarRow, loginRow, separator, footer],
             spacing: 14
         )
         stack.alignment = .leading
@@ -197,6 +241,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -18),
             folderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
             hotkeyField.widthAnchor.constraint(equalToConstant: 160),
+            voiceHotkeyField.widthAnchor.constraint(equalToConstant: 160),
         ])
     }
 
@@ -257,6 +302,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private func loadFromPreferences() {
         folderField.stringValue = (prefs.destinationFolder as NSString).abbreviatingWithTildeInPath
         hotkeyField.setBinding(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
+        voiceHotkeyField.setBinding(keyCode: prefs.voiceHotkeyKeyCode, modifiers: prefs.voiceHotkeyModifiers)
         confirmToggle.state = prefs.confirmationEnabled ? .on : .off
         durationSlider.integerValue = prefs.confirmationDuration
         durationValueLabel.stringValue = "\(prefs.confirmationDuration) ms"
@@ -266,6 +312,26 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         menuBarToggle.state = prefs.menuBarEnabled ? .on : .off
         loginToggle.state = prefs.startAtLogin ? .on : .off
         updateMenuBarNote()
+        refreshRelayStatus()
+    }
+
+    /// Update the Sync row from the current enrollment state. Public so the
+    /// AppDelegate can refresh it after a deep-link enrollment completes.
+    func refreshRelayStatus() {
+        if let base = prefs.relayBaseURL, let url = URL(string: base),
+           let deviceId = (try? RelayCredentials.deviceId()) ?? nil {
+            let host = url.host ?? base
+            let shortID = String(deviceId.prefix(8))
+            var line = "Enrolled with \(host) · \(shortID)…"
+            if let status = relayStatusText?(), !status.isEmpty { line += "\n\(status)" }
+            relayStatusLabel.stringValue = line
+            relayStatusLabel.textColor = .secondaryLabelColor
+            linkDeviceButton.isEnabled = true
+        } else {
+            relayStatusLabel.stringValue = "Not enrolled. Run `stash-relay enroll` and open the link, or scan from another device."
+            relayStatusLabel.textColor = .tertiaryLabelColor
+            linkDeviceButton.isEnabled = false
+        }
     }
 
     private func updateMenuBarNote() {
@@ -337,6 +403,10 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         prefs.imageNormalization = (normalizationToggle.state == .on)
     }
 
+    @objc private func linkDeviceClicked() {
+        onLinkDevice?()
+    }
+
     @objc private func loginToggleChanged() {
         prefs.startAtLogin = (loginToggle.state == .on)
     }
@@ -357,6 +427,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Window delegate -------------------------------------------------
 
     func windowWillClose(_ notification: Notification) {
-        // No-op for now
+        statusTimer?.invalidate()
+        statusTimer = nil
     }
 }

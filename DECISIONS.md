@@ -351,3 +351,221 @@ A few things the codebase deliberately does not have, to stay within the
 - The mustache icon is drawn by hand rather than imported from an SF Symbol or
   asset, which keeps the bundle smaller and avoids depending on a symbol that
   might not exist on macOS 12.
+
+---
+
+# Ecosystem extension — hub, voice, and relay sync
+
+Everything above describes the original capture-only app. The sections below
+document the extension that makes `stash` the Stash ecosystem's **hub / system of
+record** (see `../DESIGN.md` and `PLAN.md`): it gains **voice capture** and
+becomes the relay's sole decryptor + vault-writer (consumer) and a producer that
+mirrors local captures to the relay. Built in milestones M1–M5; M6 is this
+budget/charter write-up.
+
+## Charter expansion (the `BUILD.md` non-goals deliberately overturned)
+
+`BUILD.md` lists "No syncing" and "no network calls except the URL title fetch"
+as non-goals. The hub role overturns both, on par with the documented
+Carbon-hotkey deviation:
+
+- **Syncing exists now.** The app holds a persistent SSE connection to a
+  self-hosted relay, fetches encrypted captures other devices posted, decrypts
+  them, and writes them into the vault `_inbox/`. It also posts its own local
+  captures back so other clients stay current.
+- **The hot path stays sacred.** Hotkey→paint <50ms, Enter→file <100ms,
+  dismiss→focus <16ms are unchanged. *All* relay/SSE/voice work runs on
+  background queues, Swift `actor`s, or `URLSession` — never on the
+  hotkey→panel-show path. The capture window is still pre-allocated and shown
+  with `orderFront`; the voice toast is likewise a pre-allocated `NSPanel`.
+
+## Minimum macOS bumped 13 → 26
+
+Voice transcription uses the on-device `SpeechAnalyzer` / `SpeechTranscriber`
+(the iOS-26-era API), so the two-file vault output (ALAC `.m4a` + WebVTT) is
+byte-symmetric with the iOS app. That API requires macOS 26, so the floor moved
+from 13 to 26 — dropping the 13–25 segment of the public app, accepted as the
+price of iOS parity. `Makefile`'s deployment `-target` and Info.plist's
+`LSMinimumSystemVersion` both moved to `26.0`.
+
+## Framework set (still zero third-party dependencies)
+
+All additions are macOS **system** frameworks, so the swiftc + Makefile single
+target and the "no package managers / no third-party libraries" rule still hold:
+
+- **AVFoundation** — `AVAudioEngine` input-node capture, ALAC encoding, the
+  CAF→M4A passthrough remux.
+- **Speech** — `SpeechAnalyzer` / `SpeechTranscriber` live on-device transcription.
+- **CryptoKit** — already used for SHA-256; now also `AES.GCM` for the E2E
+  envelope and `SymmetricKey`.
+- **Security** — the Keychain (device API key, E2E key, device id) and
+  `SecRandomCopyBytes` for key generation.
+- **Network** — `NWPathMonitor` owns the SSE reconnect-on-path-up decision.
+- **CoreAudio** — the default-input-device property listener for voice auto-stop.
+- **CoreImage** — `CIQRCodeGenerator` renders the "Link a device" QR.
+- **os** — `Logger` for privacy-respecting unified logging (no log files, no
+  telemetry; payloads/keys are never logged).
+
+## Voice capture (M1)
+
+A second global chord (default ⌃⌥⌘V, configurable) toggles recording. The
+recording surface is a **non-activating `NSPanel` toast** (red dot + elapsed
+timer + a rolling one-line live transcript) so it records while you keep working;
+the menu-bar icon also flips to a red record dot. **Stop saves, Escape discards.**
+
+The audio/transcription pipeline is ported from `stash-ios` for byte-parity
+(`AudioFileWriter`, `AudioFinalizer`, `Transcriber` → `VoiceTranscriber`,
+`VTTWriter`, `Naming` → `VoiceNaming`), with the iOS-isms replaced:
+
+- **No `AVAudioSession`** (iOS-only): the engine taps the system default input
+  node directly.
+- **Two auto-stop triggers, not iOS's route-change notification:** a CoreAudio
+  `kAudioHardwarePropertyDefaultInputDevice` listener **and** an
+  `AVAudioEngineConfigurationChange` observer both stop-and-finalize the
+  recording (no garble on a device/sample-rate change; what was captured is
+  already on disk).
+- **Mic TCC** is requested via `AVCaptureDevice`; a denial surfaces on the toast
+  (an `.accessory` app has no window to anchor an alert).
+- **Crash/sleep resilience:** audio is written incrementally to an
+  ALAC-in-`.caf` working file plus a `.cues.json` sidecar. `willSleep`
+  force-flushes (the pre-suspend window is too short to remux); launch and
+  `didWake` run `recoverOrphans`, which finalizes any leftover working file.
+
+## Relay sync — the wire/encryption contract
+
+The authoritative contract is pinned by the relay's own tests
+(`../stash-relay/tests/crypto_roundtrip.rs`); this app matches it byte-for-byte
+(verified by standalone round-trip tests during development):
+
+- **Cipher:** AES-256-GCM, CryptoKit `.combined` layout `nonce(12) ‖ ct ‖ tag(16)`,
+  fresh random nonce per seal.
+- **AAD:** the item id as its 36-char **lowercase** hyphenated UUID string, UTF-8.
+  For voice, each part's AAD is `id ‖ role_byte`.
+- **Inner payload (text/url):** JSON `{schema_version, captured_at (epoch
+  seconds), utc_offset_seconds, text?, source_app?}`. **image/file** frame
+  `[u32_LE json_len][json][bytes]` inside one seal. **voice** is a container
+  `[u32_LE audio_len][audio][u32_LE vtt_len][vtt][u32_LE meta_len][meta]` of three
+  independently-sealed, role-tagged parts (0x01 ALAC, 0x02 WebVTT, 0x03 JSON
+  metadata); the role byte is prepended to each plaintext and bound in its AAD.
+  Length prefixes are **little-endian**.
+- **Capture-time fidelity:** `captured_at` + `utc_offset_seconds` travel *inside*
+  the encryption (zero-knowledge — never a cleartext header), so a laptop
+  draining a stale backlog stamps `created`/filenames from capture time, not
+  drain time. (This is why `FrontMatter.build` and `ContentHandler` gained a
+  capture-timestamp + UTC-offset parameter; the same-second collision tiebreak
+  for relayed items is the **item id**, not a `fileExists` probe — see below.)
+
+## Enrollment + key custody (M2)
+
+The app registers the `stash://` URL scheme (delivered as a GetURL Apple Event,
+since custom schemes don't arrive via `application(_:open:)`). A
+`stash://enroll?relay=&token=[&k=]` link is claimed via `POST /enroll/claim`; the
+returned `device_id` + `api_key` go into the **Keychain with
+`kSecAttrAccessibleAfterFirstUnlock`** (the consumer must read them while the
+laptop is locked). The E2E key: if the link carries `k`, adopt it; otherwise the
+Mac is **device #1** and generates 32 random bytes, becoming the custodian (the
+inverse of iOS, which refuses custodianship on a key-less link). "Link a device"
+mints a token via `POST /enroll/create` and renders a QR carrying `k`
+device-to-device — the key never transits the relay.
+
+## Relay consumer — the no-loss pipeline (M3/M4)
+
+The consumer (`RelayConsumer`, a Swift `actor`) drains items through a **serial,
+in-seq-order** pipeline: `fetch → decrypt → write atomically + fsync → record id
+written → advance contiguous cursor → enqueue durable ack`. At ~2 devices, serial
+ordering removes whole classes of race for free. The load-bearing pieces
+(`SyncStore`, persisted atomically to app-support — never the Drive mount):
+
+- **Cursor** = contiguous high-water mark of seqs actually *written or poisoned*,
+  sent as `Last-Event-ID` on reconnect. It never advances past an item that
+  wasn't durably handled.
+- **Written-id set** is the idempotency oracle (checked instead of probing the
+  eventually-consistent vault), pruned once the cursor passes a seq.
+- **Poison set** lets a terminally-failed item advance the cursor (so it doesn't
+  re-replay the whole backlog forever) but it is **never acked** (acking would
+  let the relay purge the evidence); poisons are surfaced, not silent.
+- **Durable ack queue** is independent of the cursor — a failed ack leaves the
+  item written but the cursor already past it, so without the queue it would leak
+  in the relay until TTL. Replayed on launch/wake, paced (honors `429`/
+  `Retry-After`).
+
+Failure classification (PLAN #3): **transient** (network/5xx/timeout/locked
+Keychain) → backoff + retry the head; **terminal** (GCM auth failure, malformed,
+404-gone) → poison; **not-yet-keyed** (no E2E key) → *pause* the pipeline, never
+poison (else the whole backlog is discarded as undecryptable). **Voice is
+all-or-nothing:** the envelope opens all three parts before any file is written.
+
+**SSE resilience (PLAN #1):** a `.default` `URLSession` with a custom data-task
+delegate parses bytes incrementally (a `.background` session can't hold an
+indefinite stream); `timeoutIntervalForResource` is effectively infinite,
+`waitsForConnectivity = false`. A `DispatchSourceTimer` ping-watchdog (~50s,
+App-Nap-resilient) catches half-open sockets; reconnect fires on `didWake`
+(cancel the half-open task first), `NWPathMonitor` path-satisfied (debounced),
+the watchdog, or task completion, with exponential + full-jitter backoff. One
+long-lived `ProcessInfo.beginActivity(.userInitiated)` keeps SSE handling alive
+when unattended — but **not** `.idleSystemSleepDisabled`, so the laptop still
+sleeps on lid-close.
+
+## Relay producer + self-loop guard (M5)
+
+After a local capture is written into `_inbox/` (the system of record), it is
+also sealed and `POST`ed to the relay (best-effort — a failed post only means a
+viewer client misses an update, never data loss). The id is recorded
+**self-originated before** the POST, so when the relay echoes it back over this
+Mac's own SSE stream the consumer skips the duplicate write but still advances the
+cursor + acks (else a permanent cursor hole / relay leak). If a post ultimately
+fails, the marker is removed so it doesn't leak. Producer and consumer share one
+`SyncStore` so the guard is visible across both.
+
+## Relayed-write naming (why it differs from local captures)
+
+The vault is a Drive/CloudStorage mount where `fileExists` is eventually
+consistent, so relayed writes do **not** use the local path's `fileExists`-based
+`-2/-3` collision suffix. Instead the filename's short hash is derived from the
+**item id**: distinct items get distinct names deterministically, and a
+re-delivery of the same item maps to the same name (an idempotent overwrite of
+identical content). Writes go through `Data.write(.atomic)` + an explicit `fsync`
+so the consumer can record an item written *before* acking.
+
+## Performance budgets — stated revision (M6)
+
+The expanded charter changes the resource picture; per PLAN this is the
+re-baseline:
+
+- **Idle RSS:** the original <10 MB budget no longer applies. Measured idle RSS
+  (unenrolled, no SSE socket held) is **~75 MB**. The jump is dominated by the
+  newly-linked large frameworks (AVFoundation + Speech) and the
+  CoreAudio/`AVAudioEngine` the voice subsystem pre-allocates; much of the RSS is
+  *shared, clean* framework pages rather than dirty heap. The voice toast + relay
+  singletons themselves are small. **Revised target: idle RSS ≤ ~90 MB** with one
+  held SSE socket. (A finer re-baseline with an enrolled device + live relay is
+  pending real traffic.)
+- **Idle CPU:** still **~0.0%** over a steady state — the serial pipeline is
+  idle when there's nothing to drain, and the SSE stream only wakes on a byte or
+  the ~20s keepalive.
+- **Bundle size:** **~0.9 MB**, still well under the 5 MB cap (no embedded
+  frameworks; the system frameworks are dynamically linked).
+- **Hot path:** preserved by construction — every new subsystem runs off the
+  hotkey→paint / Enter→file / dismiss→focus paths.
+
+## Share extension — deferred (M6)
+
+The macOS Share-menu extension is **deferred**, as the plan scopes it: it
+requires a second `.appex` target plus an **App Group + shared-Keychain access
+group**, which need a **paid Apple Developer account** (free/ad-hoc provisioning
+can't grant those entitlements), and it can't be signed or verified in this
+environment. When provisioning is available it adds a second compile+bundle step
+to the `Makefile`; the app deliberately stays a **single menu-bar daemon** (not
+split into hub/capture processes) until then.
+
+## Source layout added
+
+```
+Sources/Keychain.swift          # AfterFirstUnlock Keychain wrapper (notFound vs locked)
+Sources/Voice/                  # M1: capture engine, transcriber, file writer/finalizer,
+                                #     toast panel, controller, store, naming, permissions
+Sources/Enroll/                 # M2: deep-link enrollment + key custody, QR window
+Sources/Relay/                  # M2–M5: credentials, envelope (seal/open), SyncStore,
+                                #        REST client, SSE client, consumer, producer
+```
+

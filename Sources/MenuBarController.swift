@@ -45,6 +45,47 @@ final class MenuBarController {
     @objc private func prefsClicked() { onPreferences?() }
     @objc private func quitClicked()  { onQuit?() }
 
+    // MARK: - Recording state -------------------------------------------------
+
+    /// Swap the menu-bar icon to an unmistakable recording state (a red record
+    /// dot) while a voice capture is live, and back to the mustache when idle.
+    /// No-op when the menu bar is hidden (there's no status item to update).
+    func updateIcon(isRecording: Bool) {
+        guard let button = statusItem?.button else { return }
+        if isRecording {
+            button.image = Self.recordingImage()
+            button.toolTip = "stash — recording"
+        } else {
+            let image = Self.mustacheImage()
+            image.isTemplate = true
+            button.image = image
+            button.contentTintColor = nil
+            button.toolTip = "stash"
+        }
+    }
+
+    /// A red record dot for the menu bar. A non-template image keeps the red
+    /// through the bar's tinting; a red palette symbol configuration makes the
+    /// fill reliably red (a plain `contentTintColor` doesn't recolor a
+    /// non-template image). Falls back to a hand-filled red circle.
+    private static func recordingImage() -> NSImage {
+        if let symbol = NSImage(systemSymbolName: "record.circle.fill",
+                                accessibilityDescription: "Recording") {
+            let config = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
+            let configured = symbol.withSymbolConfiguration(config) ?? symbol
+            configured.isTemplate = false
+            return configured
+        }
+        let size = NSSize(width: 14, height: 14)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
     // MARK: - Icon ------------------------------------------------------------
 
     /// Prefer SF Symbols (which exist on macOS 11+ and look right at every

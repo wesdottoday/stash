@@ -10,6 +10,8 @@ final class Preferences {
         static let destinationFolder    = "destinationFolder"
         static let hotkeyKeyCode        = "hotkeyKeyCode"
         static let hotkeyModifiers      = "hotkeyModifiers"
+        static let voiceHotkeyKeyCode   = "voiceHotkeyKeyCode"
+        static let voiceHotkeyModifiers = "voiceHotkeyModifiers"
         static let confirmationEnabled  = "confirmationEnabled"
         static let confirmationDuration = "confirmationDuration"
         static let imageNormalization   = "imageNormalization"
@@ -18,16 +20,22 @@ final class Preferences {
         static let windowOriginY        = "windowOriginY"
         static let windowPositionSet    = "windowPositionSet"
         static let hasLaunchedBefore    = "hasLaunchedBefore"
+        static let relayBaseURL         = "relayBaseURL"
     }
 
     static let defaultHotkeyKeyCode: Int = 44                                // forward slash
     static let defaultHotkeyModifiers: UInt = NSEvent.ModifierFlags([.control, .option, .command]).rawValue
+
+    static let defaultVoiceHotkeyKeyCode: Int = 9                            // V (kVK_ANSI_V)
+    static let defaultVoiceHotkeyModifiers: UInt = NSEvent.ModifierFlags([.control, .option, .command]).rawValue
 
     private init() {
         defaults.register(defaults: [
             Keys.destinationFolder:    (NSString(string: "~/_inbox").expandingTildeInPath),
             Keys.hotkeyKeyCode:        Preferences.defaultHotkeyKeyCode,
             Keys.hotkeyModifiers:      Int(Preferences.defaultHotkeyModifiers),
+            Keys.voiceHotkeyKeyCode:   Preferences.defaultVoiceHotkeyKeyCode,
+            Keys.voiceHotkeyModifiers: Int(Preferences.defaultVoiceHotkeyModifiers),
             Keys.confirmationEnabled:  true,
             Keys.confirmationDuration: 100,
             Keys.imageNormalization:   true,
@@ -56,6 +64,20 @@ final class Preferences {
             return NSEvent.ModifierFlags(rawValue: safe)
         }
         set { defaults.set(Int(newValue.rawValue), forKey: Keys.hotkeyModifiers) }
+    }
+
+    var voiceHotkeyKeyCode: UInt32 {
+        get { UInt32(defaults.integer(forKey: Keys.voiceHotkeyKeyCode)) }
+        set { defaults.set(Int(newValue), forKey: Keys.voiceHotkeyKeyCode) }
+    }
+
+    var voiceHotkeyModifiers: NSEvent.ModifierFlags {
+        get {
+            let raw = defaults.integer(forKey: Keys.voiceHotkeyModifiers)
+            let safe = raw > 0 ? UInt(raw) : Preferences.defaultVoiceHotkeyModifiers
+            return NSEvent.ModifierFlags(rawValue: safe)
+        }
+        set { defaults.set(Int(newValue.rawValue), forKey: Keys.voiceHotkeyModifiers) }
     }
 
     var confirmationEnabled: Bool {
@@ -109,6 +131,18 @@ final class Preferences {
     var hasLaunchedBefore: Bool {
         get { defaults.bool(forKey: Keys.hasLaunchedBefore) }
         set { defaults.set(newValue, forKey: Keys.hasLaunchedBefore) }
+    }
+
+    /// The relay's base URL (e.g. `https://relay.example.com`), captured during
+    /// enrollment from the `stash://enroll?relay=…` deep link. Non-secret, so it
+    /// lives in UserDefaults (always readable, even while the screen is locked);
+    /// the API key and E2E key live in the Keychain. Nil until enrolled.
+    var relayBaseURL: String? {
+        get { defaults.string(forKey: Keys.relayBaseURL) }
+        set {
+            if let v = newValue, !v.isEmpty { defaults.set(v, forKey: Keys.relayBaseURL) }
+            else { defaults.removeObject(forKey: Keys.relayBaseURL) }
+        }
     }
 
     var startAtLogin: Bool {

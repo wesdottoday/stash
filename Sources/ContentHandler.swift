@@ -72,17 +72,7 @@ enum ContentHandler {
                                       when: Date,
                                       prefs: Preferences) -> CaptureResult
     {
-        var body = payload.text
-
-        let urlMatch = URLDetector.firstURL(in: body)
-        let pureURL  = URLDetector.isPureURL(payload.text)
-        let type: FrontMatterType = (urlMatch != nil) ? .url : .text
-
-        if pureURL, let m = urlMatch {
-            body = "[\(m.raw)](\(m.raw))"
-        } else if urlMatch != nil {
-            body = URLDetector.wrapURLsAsMarkdownLinks(in: body)
-        }
+        let (body, type, urlMatch) = renderMarkdownBody(payload.text)
 
         // Attachments (image and/or file)
         var attachmentLines: [String] = []
@@ -160,6 +150,138 @@ enum ContentHandler {
         guard contents.contains(old) else { return }
         contents = contents.replacingOccurrences(of: old, with: new)
         try? contents.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Body rendering (shared by local + relayed paths) ----------------
+
+    /// Apply URL detection + markdown-link wrapping to raw text, returning the
+    /// rendered body, the inferred front-matter type, and the first URL match
+    /// (for the async title backfill). Shared by the local capture path and the
+    /// relay consumer so both wrap links and infer `type` identically.
+    static func renderMarkdownBody(_ text: String) -> (body: String, type: FrontMatterType, urlMatch: URLDetector.Match?) {
+        let urlMatch = URLDetector.firstURL(in: text)
+        let type: FrontMatterType = (urlMatch != nil) ? .url : .text
+        var body = text
+        if URLDetector.isPureURL(text), let m = urlMatch {
+            body = "[\(m.raw)](\(m.raw))"
+        } else if urlMatch != nil {
+            body = URLDetector.wrapURLsAsMarkdownLinks(in: text)
+        }
+        return (body, type, urlMatch)
+    }
+
+    // MARK: - Relay consumer writes -------------------------------------------
+    //
+    // These write items received from another device via the relay. Unlike the
+    // local path they:
+    //   - stamp `created`/the filename from the payload's capture time + original
+    //     UTC offset (PLAN: never from drain time);
+    //   - derive the filename's short hash from the **item id** (deterministic +
+    //     collision-free across distinct items; a re-delivery of the same item
+    //     maps to the same name → idempotent overwrite) rather than relying on a
+    //     `fileExists` collision check against the eventually-consistent Drive
+    //     mount (PLAN #7);
+    //   - fsync the file before returning so the caller can durably record it
+    //     written before acking (PLAN #2).
+    // Each returns whether the (anchor) file was durably written.
+
+    static func saveRelayedMarkdown(text: String,
+                                    sourceApp: String?,
+                                    capturedAt: Date,
+                                    utcOffsetSeconds: Int,
+                                    itemId: String,
+                                    to destination: URL) -> Bool {
+        guard ensureDirectory(destination) else { return false }
+        let (body, type, urlMatch) = renderMarkdownBody(text)
+        let tags = HashtagExtractor.tags(from: body)
+        let frontMatter = FrontMatter.build(type: type, created: capturedAt,
+                                            utcOffsetSeconds: utcOffsetSeconds,
+                                            sourceApp: sourceApp, tags: tags)
+        let document = frontMatter + "\n\n" + body + (body.hasSuffix("\n") ? "" : "\n")
+        let timestamp = filenameTimestamp(capturedAt, utcOffsetSeconds: utcOffsetSeconds)
+        let url = destination.appendingPathComponent("\(timestamp)-\(ContentHash.short(itemId)).md")
+        guard writeDataDurably(Data(document.utf8), to: url) else { return false }
+
+        if type == .url, let m = urlMatch {
+            URLTitleFetcher.fetchTitle(for: m.url) { title in
+                guard let title = title else { return }
+                updateTitle(in: url, urlString: m.raw, title: title)
+            }
+        }
+        return true
+    }
+
+    static func saveRelayedImage(data: Data,
+                                 capturedAt: Date,
+                                 utcOffsetSeconds: Int,
+                                 itemId: String,
+                                 to destination: URL,
+                                 prefs: Preferences = .shared) -> Bool {
+        guard ensureDirectory(destination) else { return false }
+        let (out, fmt) = prefs.imageNormalization
+            ? ImageNormalizer.normalizeToPNGIfNeeded(data)
+            : (data, ImageNormalizer.detectFormat(data))
+        let timestamp = filenameTimestamp(capturedAt, utcOffsetSeconds: utcOffsetSeconds)
+        let url = destination.appendingPathComponent("\(timestamp)-\(ContentHash.short(itemId)).\(fmt.fileExtension)")
+        return writeDataDurably(out, to: url)
+    }
+
+    static func saveRelayedFile(data: Data,
+                                filename: String?,
+                                itemId: String,
+                                to destination: URL,
+                                prefs: Preferences = .shared) -> Bool {
+        guard ensureDirectory(destination) else { return false }
+        let base = (filename?.isEmpty == false ? filename! : "file")
+        let name = prefs.imageNormalization ? ImageNormalizer.normalizeFilename(base) : base
+        // Prefix with the item-id short hash: deterministic + collision-free
+        // across distinct items, without a Drive-mount fileExists check (#7).
+        let url = destination.appendingPathComponent("\(ContentHash.short(itemId))-\(name)")
+        return writeDataDurably(data, to: url)
+    }
+
+    static func saveRelayedVoice(audio: Data,
+                                 vtt: String,
+                                 capturedAt: Date,
+                                 utcOffsetSeconds: Int,
+                                 itemId: String,
+                                 to destination: URL) -> Bool {
+        guard ensureDirectory(destination) else { return false }
+        let timestamp = filenameTimestamp(capturedAt, utcOffsetSeconds: utcOffsetSeconds)
+        let base = "\(timestamp)-\(ContentHash.short(itemId))"
+        let audioURL = destination.appendingPathComponent(VoiceNaming.audioFilename(base: base, ext: "m4a"))
+        let vttURL = destination.appendingPathComponent(VoiceNaming.transcriptFilename(base: base))
+        // Envelope already enforced all-or-nothing decrypt of the 3 parts; write
+        // the audio (the anchor) durably, then the transcript alongside it.
+        guard writeDataDurably(audio, to: audioURL) else { return false }
+        _ = writeDataDurably(Data(vtt.utf8), to: vttURL)
+        return true
+    }
+
+    /// Atomic write + best-effort fsync. On a Drive/CloudStorage mount fsync is
+    /// eventually-consistent, but it's the strongest durability barrier available
+    /// and lets the consumer record an item written before acking (PLAN #2).
+    @discardableResult
+    private static func writeDataDurably(_ data: Data, to url: URL) -> Bool {
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            return false
+        }
+        // fsync the file, then the containing directory so the atomic write's
+        // rename (the new directory entry) is itself durable, not just the data
+        // blocks. On a Drive/CloudStorage mount this is best-effort (#7).
+        let fd = open(url.path, O_RDONLY)
+        if fd >= 0 {
+            fsync(fd)
+            close(fd)
+        }
+        let dirFD = open(url.deletingLastPathComponent().path, O_RDONLY)
+        if dirFD >= 0 {
+            fsync(dirFD)
+            close(dirFD)
+        }
+        return true
     }
 
     // MARK: - Image attachment ------------------------------------------------
@@ -278,8 +400,15 @@ enum ContentHandler {
         return f
     }()
 
-    static func filenameTimestamp(_ date: Date) -> String {
-        timestampFormatter.string(from: date)
+    static func filenameTimestamp(_ date: Date, utcOffsetSeconds: Int? = nil) -> String {
+        guard let offset = utcOffsetSeconds, let tz = TimeZone(secondsFromGMT: offset) else {
+            return timestampFormatter.string(from: date)
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd-HHmmss"
+        f.timeZone = tz
+        return f.string(from: date)
     }
 
     // MARK: - Filesystem ------------------------------------------------------
